@@ -6,10 +6,36 @@ import argparse
 import importlib
 import io
 import json
+import hashlib
+import time
+import importlib.metadata
 import os
 import platform
 import sys
 from pathlib import Path
+
+
+def source_hash() -> str:
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    paths = [root / name for name in ("requirements.txt", "runtime_probe.py", "suite_entry.py")]
+    for directory in ("suite", "color_tool", "original_scripts", "plugins"):
+        paths.extend((root / directory).rglob("*.py"))
+    for path in sorted(paths):
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def validate_report(report: dict) -> bool:
+    try:
+        return (report["ready"] is True and bool(report["checks"])
+                and all(item["ok"] for item in report["checks"])
+                and os.path.normcase(os.path.abspath(report["python"])) == os.path.normcase(os.path.abspath(sys.executable))
+                and 0 <= time.time() - report["checked_at"] < 45
+                and report["source_hash"] == source_hash())
+    except (KeyError, TypeError, OSError):
+        return False
 
 
 def check_runtime(gui: bool = True) -> dict:
@@ -20,7 +46,12 @@ def check_runtime(gui: bool = True) -> dict:
             info = fn()
             checks.append({"name": name, "ok": True, "package": package, "detail": str(info or "正常")})
         except Exception as exc:
-            checks.append({"name": name, "ok": False, "package": package, "detail": str(exc)[:800]})
+            try:
+                installed = importlib.metadata.version(package) if package else ""
+            except importlib.metadata.PackageNotFoundError:
+                installed = ""
+            checks.append({"name": name, "ok": False, "package": package, "detail": str(exc)[:800],
+                           "installed_version": installed})
 
     def syntax():
         root = Path(__file__).resolve().parent
@@ -50,13 +81,14 @@ def check_runtime(gui: bool = True) -> dict:
     check("Tk 界面", tk_test)
 
     def qt_test():
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        if os.name != "nt":
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6 import __version__
         from PySide6.QtWidgets import QApplication, QWidget
         app = QApplication.instance() or QApplication([])
         window = QWidget()
         window.resize(100, 100)
-        window.show()
+        window.winId()  # 实际创建窗口及平台资源，检测过程不弹出测试窗口。
         app.processEvents()
         window.close()
         return __version__ + "（已创建窗口）"
@@ -106,15 +138,29 @@ def check_runtime(gui: bool = True) -> dict:
 
     def entry_test():
         from suite.legacy import load_original
+        from suite.registry import TOOLS
         from color_tool import data, gemini
-        for key in ("matcher", "generator", "joiner"):
-            load_original(key)
-        return "四个工具均可导入"
+        for tool in TOOLS:
+            if tool.filename:
+                load_original(tool.key)
+            elif tool.entrypoint:
+                module, function = tool.entrypoint.split(":")
+                assert callable(getattr(importlib.import_module(module), function))
+        return f"{len(TOOLS)} 个工具均可导入"
 
-    check("四个独立入口", entry_test)
+    from suite.registry import TOOLS
+    registered = set()
+    for tool in TOOLS:
+        for dependency in tool.dependencies:
+            if dependency.module not in registered:
+                registered.add(dependency.module)
+                check("扩展依赖 " + dependency.module,
+                      lambda module=dependency.module: importlib.import_module(module), dependency.package)
+
+    check("工具入口", entry_test)
     return {"ready": all(item["ok"] for item in checks), "checks": checks,
             "python": sys.executable, "version": platform.python_version(), "architecture": platform.machine(),
-            "gui_checked": gui}
+            "gui_checked": gui, "checked_at": time.time(), "source_hash": source_hash()}
 
 
 def main():

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,26 +22,123 @@ import (
 )
 
 type checkItem struct {
-	Name   string `json:"name"`
-	OK     bool   `json:"ok"`
-	Detail string `json:"detail"`
+	Name             string `json:"name"`
+	OK               bool   `json:"ok"`
+	Detail           string `json:"detail"`
+	Package          string `json:"package"`
+	InstalledVersion string `json:"installed_version"`
 }
 type report struct {
-	Ready   bool        `json:"ready"`
-	Checks  []checkItem `json:"checks"`
-	Python  string      `json:"python"`
-	Version string      `json:"version"`
+	Ready        bool        `json:"ready"`
+	Checks       []checkItem `json:"checks"`
+	Python       string      `json:"python"`
+	Version      string      `json:"version"`
+	CheckedAt    float64     `json:"checked_at"`
+	SourceHash   string      `json:"source_hash"`
+	Architecture string      `json:"architecture"`
+	GUIChecked   bool        `json:"gui_checked"`
 }
 type interpreter struct {
 	Executable string `json:"executable"`
 	Version    []int  `json:"version"`
 }
 type installer struct {
-	root   string
-	cache  string
-	client *http.Client
-	log    func(string)
-	step   func(int, string, int)
+	root       string
+	cache      string
+	client     *http.Client
+	log        func(string)
+	step       func(int, string, int)
+	needsSetup func()
+	validated  report
+}
+
+func missingPackages(status report) []string {
+	seen := map[string]bool{}
+	var packages []string
+	for _, item := range status.Checks {
+		if !item.OK && item.Package != "" && !seen[strings.ToLower(item.Package)] {
+			seen[strings.ToLower(item.Package)] = true
+			name := item.Package
+			if item.InstalledVersion != "" {
+				name += "==" + item.InstalledVersion
+			}
+			packages = append(packages, name)
+		}
+	}
+	sort.Strings(packages)
+	return packages
+}
+
+func healthyScore(status report) int {
+	score := 0
+	for _, item := range status.Checks {
+		if item.OK {
+			score++
+		}
+	}
+	return score
+}
+
+func withinDirectory(path, directory string) bool {
+	rel, err := filepath.Rel(directory, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func (i *installer) remember(python string, status report) {
+	i.validated = status
+	os.MkdirAll(i.cache, 0755)
+	data, _ := json.Marshal(map[string]string{"python": python})
+	os.WriteFile(filepath.Join(i.cache, "last_runtime.json"), data, 0644)
+}
+
+func (i *installer) inheritPackages(ctx context.Context, source, target string) error {
+	// 自建覆盖层默认继承系统包；已有第三方虚拟环境还需复用其私有 site-packages。
+	code := "import json,sys,site;from pathlib import Path;print(json.dumps([p for p in site.getsitepackages() if sys.prefix!=sys.base_prefix and Path(p).resolve().is_relative_to(Path(sys.prefix).resolve())]))"
+	data, err := i.run(ctx, source, "-c", code)
+	if err != nil {
+		return err
+	}
+	var paths []string
+	if err := json.Unmarshal(data, &paths); err != nil {
+		return err
+	}
+	encoded, _ := json.Marshal(paths)
+	code = "import json,sysconfig;from pathlib import Path;paths=json.loads(" + strconv.Quote(string(encoded)) + ");lines=['import site,sys;site.addsitedir('+ascii(p)+');sys.path.remove('+ascii(p)+');sys.path.insert(0,'+ascii(p)+')' for p in paths];Path(sysconfig.get_path('purelib'),'greatlibrary_inherited.pth').write_text('\\n'.join(lines)+'\\n',encoding='ascii')"
+	_, err = i.run(ctx, target, "-c", code)
+	return err
+}
+
+func (i *installer) fastPath(ctx context.Context) string {
+	var paths []string
+	data, err := os.ReadFile(filepath.Join(i.cache, "last_runtime.json"))
+	if err == nil {
+		var saved map[string]string
+		if json.Unmarshal(data, &saved) == nil && saved["python"] != "" {
+			paths = append(paths, saved["python"])
+		}
+	}
+	if python, err := exec.LookPath("python"); err == nil {
+		paths = append(paths, python)
+	}
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if seen[strings.ToLower(path)] || strings.Contains(strings.ToLower(path), `\windowsapps\`) {
+			continue
+		}
+		seen[strings.ToLower(path)] = true
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		status, err := i.health(ctx, path)
+		if err == nil && status.Ready {
+			i.remember(path, status)
+			return path
+		}
+		if ctx.Err() != nil {
+			return ""
+		}
+	}
+	return ""
 }
 
 func safeLog(value string) string {
@@ -214,6 +312,16 @@ func parseHealthOutput(data []byte, commandErr error) (report, error) {
 	if commandErr != nil && result.Ready {
 		return result, fmt.Errorf("检测进程未正常退出，不能标记环境就绪：%w", commandErr)
 	}
+	if result.Ready {
+		if len(result.Checks) == 0 {
+			return result, errors.New("环境检测未执行任何项目，不能标记就绪。")
+		}
+		for _, item := range result.Checks {
+			if !item.OK {
+				return result, errors.New("就绪状态与失败项目不一致。")
+			}
+		}
+	}
 	return result, nil
 }
 
@@ -226,26 +334,38 @@ func (i *installer) prepare(ctx context.Context) (string, error) {
 		}
 	}
 	i.step(0, "正在发现已有 Python 和工具箱专用环境…", 8)
+	if python := i.fastPath(ctx); python != "" {
+		i.step(3, "环境完整，直接进入工具箱。", 100)
+		return python, nil
+	}
 	choices := i.candidates(ctx)
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	var selected interpreter
+	var selectedReport report
+	bestScore := -1
 	for index, choice := range choices {
 		i.log("检查 Python：" + choice.Executable)
 		i.step(1, "正在实际测试界面、图片和 Excel 读写…", 20)
 		status, err := i.health(ctx, choice.Executable)
 		if err == nil && status.Ready {
+			i.remember(choice.Executable, status)
 			i.log("环境可用，无需下载或修改已有 Python。")
 			i.step(3, "四个入口均已通过检查，可以进入工具箱。", 100)
 			return choice.Executable, nil
 		}
-		if index == 0 {
+		if index == 0 || (err == nil && healthyScore(status) > bestScore) {
 			selected = choice
+			selectedReport = status
+			bestScore = healthyScore(status)
 		}
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+	}
+	if i.needsSetup != nil {
+		i.needsSetup()
 	}
 	if selected.Executable == "" {
 		i.step(0, "没有发现可用 Python，正在下载官方运行环境…", 15)
@@ -254,26 +374,44 @@ func (i *installer) prepare(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		selectedReport, _ = i.health(ctx, selected.Executable)
 	}
 	i.step(2, "为工具箱准备专用环境，不修改系统 Python 包…", 38)
 	hash := sha256.Sum256([]byte(selected.Executable + fmt.Sprint(selected.Version)))
 	directory := filepath.Join(i.cache, "envs", hex.EncodeToString(hash[:6]))
+	managed := withinDirectory(selected.Executable, filepath.Join(i.cache, "envs"))
+	if managed {
+		directory = filepath.Dir(filepath.Dir(selected.Executable))
+	}
 	if err := os.MkdirAll(directory, 0755); err != nil {
 		return "", err
 	}
-	if err := i.stream(ctx, selected.Executable, "-m", "venv", directory); err != nil {
-		return "", fmt.Errorf("创建专用环境失败：%w", err)
+	if !managed {
+		// 继承已安装且可用的系统包；缺少的包安装在本工具的覆盖层，不修改系统环境。
+		if err := i.stream(ctx, selected.Executable, "-m", "venv", "--system-site-packages", directory); err != nil {
+			return "", fmt.Errorf("创建专用环境失败：%w", err)
+		}
 	}
 	python := filepath.Join(directory, "Scripts", "python.exe")
+	if !managed {
+		if err := i.inheritPackages(ctx, selected.Executable, python); err != nil {
+			return "", fmt.Errorf("复用已有运行库失败：%w", err)
+		}
+	}
 	i.log("专用环境：" + directory)
-	if err := i.stream(ctx, python, "-m", "ensurepip", "--upgrade"); err != nil {
-		return "", fmt.Errorf("准备 pip 失败：%w", err)
+	if _, err := i.run(ctx, python, "-m", "pip", "--version"); err != nil {
+		if err := i.stream(ctx, python, "-m", "ensurepip"); err != nil {
+			return "", fmt.Errorf("准备 pip 失败：%w", err)
+		}
 	}
-	i.step(2, "正在下载缺失依赖，下载与安装日志显示在下方…", 50)
-	if err := i.stream(ctx, python, "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--upgrade", "--index-url", "https://pypi.org/simple", "pip"); err != nil {
-		return "", fmt.Errorf("更新 pip 失败：%w。检查网络后可重新检测。", err)
+	packages := missingPackages(selectedReport)
+	if len(packages) == 0 {
+		return "", errors.New("失败项目不是缺少 pip 运行库，无法通过重复下载修复。请查看具体检测错误。")
 	}
-	if err := i.stream(ctx, python, "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--upgrade", "--index-url", "https://pypi.org/simple", "-r", filepath.Join(i.root, "requirements.txt")); err != nil {
+	i.log("仅补齐或修复：" + strings.Join(packages, "、"))
+	i.step(2, "正在补齐缺失的运行库，已有可用库保持原样…", 50)
+	args := append([]string{"-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--index-url", "https://pypi.org/simple"}, packages...)
+	if err := i.stream(ctx, python, args...); err != nil {
 		return "", fmt.Errorf("依赖安装失败：%w。详情见日志；不会把失败的环境标记为就绪。", err)
 	}
 	i.step(2, "依赖已安装，正在重新验证四个程序…", 90)
@@ -282,8 +420,23 @@ func (i *installer) prepare(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if !status.Ready {
-		return "", errors.New("安装后仍有能力检查失败，请查看日志中的具体项目并重新检测。")
+		// 版本已安装但文件损坏时，普通 pip 不会重装；只修复失败的包自身。
+		repair := missingPackages(status)
+		if len(repair) > 0 {
+			args = append([]string{"-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--force-reinstall", "--no-deps", "--index-url", "https://pypi.org/simple"}, repair...)
+			if err := i.stream(ctx, python, args...); err != nil {
+				return "", err
+			}
+			status, err = i.health(ctx, python)
+			if err != nil {
+				return "", err
+			}
+		}
+		if !status.Ready {
+			return "", errors.New("修复后仍有能力检查失败，请查看具体项目；不重复下载所有运行库。")
+		}
 	}
+	i.remember(python, status)
 	i.step(3, "四个入口均已通过检查，可以进入工具箱。", 100)
 	return python, nil
 }
@@ -436,7 +589,12 @@ func (i *installer) launch(python string) error {
 		return err
 	}
 	defer file.Close()
-	cmd := exec.Command(python, filepath.Join(i.root, "suite_entry.py"))
+	args := []string{filepath.Join(i.root, "suite_entry.py")}
+	if i.validated.Ready && i.validated.SourceHash != "" && i.validated.CheckedAt > 0 {
+		data, _ := json.Marshal(i.validated)
+		args = append(args, "--validated-runtime", base64.StdEncoding.EncodeToString(data))
+	}
+	cmd := exec.Command(python, args...)
 	cmd.Dir = i.root
 	cmd.Env = append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 	cmd.Stdout, cmd.Stderr = file, file

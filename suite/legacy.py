@@ -76,6 +76,25 @@ def apply_palette(module, key):
             setattr(module, name, value)
 
 
+def decorate_header(root, key):
+    """只在标题栏放置装饰，不接管原有输入区或业务回调。"""
+    import tkinter as tk
+    from PIL import Image, ImageTk
+    for header in root.winfo_children():
+        try:
+            if str(header.cget("bg")).lower() != p.HEADER.lower():
+                continue
+        except tk.TclError:
+            continue
+        with Image.open(ROOT / "assets" / "patchouli.png") as artwork:
+            artwork.thumbnail((56, 56), Image.Resampling.LANCZOS)
+            icon = ImageTk.PhotoImage(artwork)
+        decoration = tk.Label(header, image=icon, bg=p.HEADER, borderwidth=0)
+        decoration.image = icon
+        decoration.place(relx=1, x=-150 if key == "generator" else -24, y=8, anchor="ne")
+        break
+
+
 def run_legacy(key: str):
     import tkinter as tk
     tool = get_tool(key)
@@ -99,5 +118,6 @@ def run_legacy(key: str):
             for child in widget.winfo_children():
                 recolor(child)
         recolor(root)
+    decorate_header(root, key)
     root.mainloop()
     return app

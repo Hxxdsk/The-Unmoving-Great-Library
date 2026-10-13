@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import math
@@ -14,7 +15,7 @@ from typing import Callable
 
 from PIL import Image, ImageOps
 
-from .data import ImageMatch, Style, ValidationError, apply_suggestions
+from .data import ImageMatch, Style, ValidationError, apply_suggestions, color_candidates, color_key
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -194,6 +195,8 @@ class GeminiClient:
             log(f"{style.code}：比较第 {offset + 1}–{offset + len(batch)} 张 / 共 {len(style.images)} 张…")
             prompt = ("第一张图片是颜色总览图，其后各图前有对应文件名。请逐一根据服装主体颜色，将商品图片与总览图的颜色配对。"
                       "衣服姿态、正反面、顺序、光照、背景、拉链或 logo 颜色可能不同；不要依赖序号、位置或文件名猜颜色。"
+                      "白色背景、黑色 logo、阴影、拉链不是衣服主体。黑色衣服的灰色反光仍可能属于黑色。"
+                      "同一图的正反面若颜色一致，不要仅因出现两件衣服就标为不确定。"
                       "总览颜色数据：" + json.dumps(rows, ensure_ascii=False) + "。"
                       "每张商品图返回 filename（精确文件名），color_label（总览图原文名称，必须来自给定列表；"
                       "无法判断时为空字符串），main_color（实际服装主体颜色中文描述），confidence（0 到 1），"
@@ -205,9 +208,47 @@ class GeminiClient:
             result = self.generate(parts, MATCH_SCHEMA)
             batch_matches = validate_matches(result, [p.name for p in batch], labels)
             matches.update(batch_matches)
+        temporary = copy.deepcopy(style)
+        temporary.chart_colors, temporary.matches = labels, matches
+        temporary.review_notes = {}
+        apply_suggestions(temporary)
+        pending = [color for color in style.colors if color not in temporary.selections
+                   and color not in style.manual_colors
+                   and any(color_key(label) == color_key(color) for label in labels)]
+        pending.sort(key=lambda color: color_key(color) != "黑")
+        for color in pending[:3]:
+            self.check_cancel()
+            candidates = color_candidates(temporary, color)
+            if not candidates:
+                temporary.review_notes[color] = "颜色图有此名称，但没有原图被识别为该颜色；请人工连接。"
+                continue
+            candidate = candidates[0]
+            path = next(path for path in style.images if path.name == candidate.filename)
+            log(f"{style.code} / {color}：已识别但需复核，正在单图比较 {candidate.filename}…")
+            try:
+                prompt = ("对这张原图作一次独立颜色复核。第一张是颜色总览，第二张是商品原图。"
+                          "此前识别的候选是" + json.dumps(candidate.color_label, ensure_ascii=False) + "，请重新核实而不是照抄。"
+                          "对比服装主体，忽略白色背景、黑色品牌文字、拉链与光照反光；同色正反面属于同一个颜色。"
+                          "如果主体属于黑色，不要因灰色反光或背景面积大漏掉黑色；深灰或深蓝也不能硬判为黑色。"
+                          "只返回一个 images 项，filename 为 " + json.dumps(path.name, ensure_ascii=False) + "。"
+                          "color_label 必须来自 " + json.dumps(labels, ensure_ascii=False) + " 或为空。"
+                          "返回 main_color、0到1的 confidence、needs_review 和中文 reason。仍不确定时保持复核标记。")
+                result = self.generate([{"text": prompt}, chart_image, image_part(path)], MATCH_SCHEMA)
+                verified = validate_matches(result, [path.name], labels)[path.name]
+                # 复核不能覆盖另一张图的结果，不降低阈值或伪造可信度。
+                matches[path.name] = verified
+                temporary.matches = matches
+                apply_suggestions(temporary)
+                temporary.review_notes[color] = (f"单图复核：{verified.reason}" if color in temporary.selections else
+                                                f"单图复核仍需确认：{verified.reason}（模型自评 {verified.confidence:.0%}）")
+            except GeminiError as exc:
+                self.check_cancel()
+                temporary.review_notes[color] = "单图复核未完成；已保留首次识别结果，请人工核对。"
+                log(f"{style.code} / {color}：{exc}")
         # 全款完成后提交结果；失败不暴露半套自动配对，也不影响此前人工选择。
         style.chart_colors = labels
         style.matches = matches
+        style.review_notes = temporary.review_notes
         style.analysis_error = ""
         apply_suggestions(style)
 

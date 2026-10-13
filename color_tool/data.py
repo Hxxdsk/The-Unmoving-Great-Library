@@ -46,6 +46,7 @@ class Style:
     selections: dict[str, str] = field(default_factory=dict)
     manual_colors: set[str] = field(default_factory=set)
     analysis_error: str = ""
+    review_notes: dict[str, str] = field(default_factory=dict)
 
     @property
     def sku_count(self) -> int:
@@ -200,6 +201,12 @@ def apply_suggestions(style: Style) -> None:
         if matches:
             best = max(matches, key=lambda m: m.confidence)
             style.selections[color] = best.filename
+
+
+def color_candidates(style: Style, color: str) -> list[ImageMatch]:
+    return sorted((match for match in style.matches.values()
+                   if color_key(match.color_label) == color_key(color)),
+                  key=lambda match: match.confidence, reverse=True)
 
 
 @dataclass(frozen=True)

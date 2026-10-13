@@ -34,22 +34,33 @@ jobs:
           $result = Get-Content $output -Raw | ConvertFrom-Json
           if (-not $result.ready) { throw 'Native launcher reported an unready environment' }
           $gui = Start-Process -FilePath $exe -PassThru
+          $hub = $null
           try {
+            for ($n = 0; $n -lt 120; $n++) {
+              Start-Sleep -Milliseconds 250
+              $gui.Refresh()
+              if ($gui.HasExited) { break }
+              if ($gui.MainWindowHandle -ne 0) { throw 'Healthy runtime unexpectedly showed the preparation window' }
+            }
+            if (-not $gui.HasExited -or $gui.ExitCode -ne 0) { throw 'Native launcher did not hand off successfully' }
+            $child = Get-CimInstance Win32_Process | Where-Object {
+              $_.ParentProcessId -eq $gui.Id -and $_.CommandLine -like '*suite_entry.py*'
+            } | Select-Object -First 1
+            if (-not $child) { throw 'Toolbox child process was not created' }
+            $hub = Get-Process -Id $child.ProcessId
             for ($n = 0; $n -lt 30; $n++) {
               Start-Sleep -Milliseconds 500
-              $gui.Refresh()
-              if ($gui.MainWindowHandle -ne 0) { break }
-              if ($gui.HasExited) { throw 'Native GUI exited before creating a window' }
+              $hub.Refresh()
+              if ($hub.HasExited) { throw 'Toolbox child exited unexpectedly' }
+              if ($hub.MainWindowHandle -ne 0) { break }
             }
-            if ($gui.MainWindowHandle -eq 0) { throw 'Native GUI window was not created' }
-            for ($n = 0; $n -lt 15 -and -not $gui.HasExited; $n++) {
-              $null = $gui.CloseMainWindow()
-              Start-Sleep -Milliseconds 500
-              $gui.Refresh()
-            }
-            if (-not $gui.HasExited) { throw 'Native GUI did not close cleanly' }
+            if ($hub.MainWindowHandle -eq 0) { throw 'Toolbox window was not created' }
+            $null = $hub.CloseMainWindow()
+            if (-not $hub.WaitForExit(10000)) { throw 'Toolbox did not close cleanly' }
+            if ($hub.ExitCode -ne 0) { throw 'Toolbox exited with an error' }
           } finally {
             if (-not $gui.HasExited) { Stop-Process -Id $gui.Id -Force }
+            if ($hub -and -not $hub.HasExited) { Stop-Process -Id $hub.Id -Force }
           }
   native-source:
     runs-on: ubuntu-latest

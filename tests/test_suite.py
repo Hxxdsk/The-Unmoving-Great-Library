@@ -1,4 +1,5 @@
 import hashlib
+import gc
 import os
 import subprocess
 import sys
@@ -23,6 +24,8 @@ def tk_root():
     root.withdraw()
     yield root
     root.destroy()
+    # Tk 变量与图片的循环引用必须在创建 Tk 的主线程释放，不能留给后续 Qt 工作线程触发 GC。
+    gc.collect()
 
 
 @pytest.mark.parametrize("key", ["matcher", "generator", "joiner"])

@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DIRECTORIES = ("suite", "color_tool", "launcher", "original_scripts", "assets", "docs", "tests", "tools", ".github")
+DIRECTORIES = ("suite", "color_tool", "plugins", "launcher", "original_scripts", "assets", "docs", "tests", "tools", ".github")
 ROOT_FILES = ("README.md", "requirements.txt", "app.py", "suite_entry.py", "runtime_probe.py",
               "start.bat", "build_windows.bat", "启动工具箱.exe", ".gitignore")
 
@@ -17,7 +17,7 @@ def main():
     files = [ROOT / name for name in ROOT_FILES]
     for directory in DIRECTORIES:
         files.extend(path for path in (ROOT / directory).rglob("*") if path.is_file()
-                     and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".log"})
+                     and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".log", ".dpapi"})
     hashes = {}
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in sorted(files):

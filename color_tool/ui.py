@@ -4,50 +4,56 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtCore import QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, QSize
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap, QColor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QCheckBox,
 )
 
-from .data import Project, Style, export_project, list_workbooks, make_plan, read_project
+from .data import Project, Style, export_project, list_workbooks, make_plan, read_project, color_candidates
+from .credentials import KeyStore, CredentialError
+from suite.widgets import ClickOnlyComboBox, FollowLog, readable_selection
 from .gemini import GeminiClient, GeminiError
 from .settings import Settings
 
 STYLESHEET = """
-QMainWindow, QDialog { background: #f3f5fa; }
-QWidget { font-family: 'Microsoft YaHei UI', 'Noto Sans CJK SC', sans-serif; font-size: 13px; color: #243147; }
-QFrame#card { background: white; border: 1px solid #e0e5ef; border-radius: 12px; }
-QLabel#title { font-size: 25px; font-weight: 700; color: #172844; }
-QFrame#toolHeader { background: #172844; border-radius: 12px; }
+QMainWindow, QDialog { background: #f5f2fa; }
+QWidget { font-family: 'Microsoft YaHei UI', 'Noto Sans CJK SC', sans-serif; font-size: 13px; color: #302341; }
+QFrame#card { background: white; border: 1px solid #e4ddee; border-radius: 12px; }
+QLabel#title { font-size: 21px; font-weight: 700; color: #302341; }
+QFrame#toolHeader { background: #302341; border-radius: 12px; }
 QFrame#toolHeader QLabel#title { color: white; }
 QFrame#toolHeader QLabel#subtitle, QFrame#toolHeader QLabel#hint { color: #c4cee2; }
 QLabel#subtitle { color: #6d7a8f; }
 QLabel#section { font-size: 15px; font-weight: 600; }
-QLabel#number { font-size: 23px; font-weight: 700; color: #4266d5; }
+QLabel#number { font-size: 19px; font-weight: 700; color: #8365bb; }
 QLabel#hint { color: #69768c; font-size: 12px; }
 QPushButton { background: white; border: 1px solid #d7deea; border-radius: 7px; padding: 8px 14px; }
-QPushButton:hover { background: #edf2ff; border-color: #a2b4ec; }
-QPushButton#primary { background: #496be8; color: white; border: 0; font-weight: 600; }
-QPushButton#primary:hover { background: #3759cf; }
+QPushButton:hover, QPushButton:focus { background: #efe8f7; color: #302341; border-color: #b69ace; }
+QPushButton#primary { background: #8365bb; color: white; border: 0; font-weight: 600; }
+QPushButton#primary:hover, QPushButton#primary:focus { background: #6e51a3; color: white; }
 QPushButton#export { background: #168b78; color: white; border: 0; font-weight: 600; }
 QPushButton:disabled { background: #eef0f5; color: #a4adbd; border-color: #e1e6ef; }
 QPushButton#primary:disabled, QPushButton#export:disabled { background: #e6eaf3; color: #9aa6bc; }
 QLineEdit, QComboBox { background: white; border: 1px solid #d7deea; border-radius: 6px; padding: 7px; min-height: 20px; }
 QLineEdit:focus, QComboBox:focus { border-color: #496be8; }
 QComboBox::drop-down { border: 0; width: 22px; }
+QComboBox QAbstractItemView { background: white; color: #302341; selection-background-color: #eae2f5; selection-color: #302341; outline: 0; }
+QComboBox QAbstractItemView::item:selected { background: #eae2f5; color: #302341; }
 QListWidget { background: #fff; border: 0; outline: none; }
-QListWidget::item { padding: 15px 10px; border-bottom: 1px solid #edf0f6; }
-QListWidget::item:selected { background: #eaf0ff; color: #3155c7; border-left: 3px solid #496be8; }
-QTableWidget { background: white; border: 1px solid #e2e7f0; gridline-color: #edf0f6; selection-background-color: #edf2ff; }
+QListWidget::item { padding: 8px 10px; border-bottom: 1px solid #edf0f6; }
+QListWidget::item:selected { background: #eae2f5; color: #302341; border-left: 3px solid #8365bb; }
+QTableWidget { background: white; color: #302341; border: 1px solid #e4ddee; gridline-color: #f0ebf6; selection-background-color: #eae2f5; selection-color: #302341; }
+QTableWidget::item:hover { background: #f5f0fa; color: #302341; }
+QTableWidget::item:selected, QTableWidget::item:selected:hover { background: #eae2f5; color: #302341; }
 QHeaderView::section { background: #f5f7fb; padding: 9px 5px; border: 0; border-bottom: 1px solid #e2e7f0; font-weight: 600; }
 QTableWidget QComboBox { margin: 3px; }
 QPlainTextEdit { background: #f8faff; border: 1px solid #e2e7f0; border-radius: 6px; font-size: 12px; }
 QProgressBar { border: 0; background: #e6ebf4; border-radius: 4px; height: 7px; }
-QProgressBar::chunk { background: #496be8; border-radius: 4px; }
+QProgressBar::chunk { background: #8365bb; border-radius: 4px; }
 QScrollArea { background: transparent; border: 0; }
 """
 
@@ -93,7 +99,7 @@ def thumbnail(path: Path, width=110, height=80):
 
 
 class Window(QMainWindow):
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, key_store: KeyStore | None = None):
         super().__init__()
         self.setWindowTitle("商品图片 · 颜色配对助手")
         self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "assets" / "toolbox.ico")))
@@ -101,11 +107,27 @@ class Window(QMainWindow):
         self.setMinimumSize(1060, 740)
         self.settings = settings or Settings(Path(QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppConfigLocation)) / "preferences.json")
+        self.key_store = key_store or KeyStore(self.settings.path.with_name("gemini-key.dpapi"))
         self.project: Project | None = None
         self.job: Job | None = None
         self._models_verified = False
         self.last_output: Path | None = None
+        self._saved_key = ""
+        self.key_timer = QTimer(self)
+        self.key_timer.setSingleShot(True)
+        self.key_timer.setInterval(700)
+        self.key_timer.timeout.connect(self.persist_key)
         self._build()
+        try:
+            self._saved_key = self.key_store.load()
+            self.api_key.blockSignals(True)
+            self.api_key.setText(self._saved_key)
+            self.api_key.blockSignals(False)
+            self._models_verified = bool(self._saved_key and self.settings.get("model") == self.key_store.validated_model)
+            if self._saved_key:
+                self.key_status.setText("Key 已安全恢复")
+        except (CredentialError, OSError):
+            self.key_status.setText("Key 保存不可用，本次仍可使用")
         self.show_remembered_model()
         saved = self.settings.get("directory")
         if saved and Path(saved).is_dir():
@@ -115,22 +137,34 @@ class Window(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(25, 20, 25, 16)
-        outer.setSpacing(12)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(8)
         header = QFrame()
         header.setObjectName("toolHeader")
         title_row = QHBoxLayout(header)
-        title_row.setContentsMargins(20, 16, 20, 16)
+        title_row.setContentsMargins(16, 8, 16, 8)
         titles = QVBoxLayout()
         titles.addWidget(label("商品图片 · 颜色配对助手", "title"))
         titles.addWidget(label("选择资料目录  →  AI 比较服装颜色  →  确认配对  →  按商品编码输出", "subtitle"))
         title_row.addLayout(titles)
         title_row.addStretch()
+        mascot = label("")
+        mascot.setPixmap(thumbnail(Path(__file__).resolve().parent.parent / "assets" / "patchouli.png", 52, 52))
+        mascot.setToolTip("帕秋莉的魔法书 · 图片与资料整理")
+        title_row.addWidget(mascot)
         title_row.addWidget(label("原图保留  /  多款号批量处理", "hint"))
+        self.setup_toggle = QPushButton("收起设置 ▴")
+        self.setup_toggle.setCheckable(True)
+        self.setup_toggle.toggled.connect(self.toggle_setup)
+        title_row.addWidget(self.setup_toggle)
         outer.addWidget(header)
 
         setup_card, setup = card()
+        self.setup_card = setup_card
+        setup.setContentsMargins(12, 8, 12, 8)
+        setup.setSpacing(6)
         grid = QGridLayout()
+        grid.setVerticalSpacing(4)
         self.directory = QLineEdit()
         self.directory.setReadOnly(True)
         self.directory.setPlaceholderText("选择包含商品资料表格和款号文件夹的目录")
@@ -150,7 +184,7 @@ class Window(QMainWindow):
         self.workbook_combo.setToolTip("目录内的商品资料表格；多个表格时在这里选择。")
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key.setPlaceholderText("粘贴 Gemini API Key（仅本次使用，不保存到磁盘）")
+        self.api_key.setPlaceholderText("粘贴 Gemini API Key（Windows 账户加密记忆）")
         self.api_key.textChanged.connect(self.key_changed)
         self.detect_button = QPushButton("检测模型")
         self.detect_button.clicked.connect(self.detect_models)
@@ -161,32 +195,48 @@ class Window(QMainWindow):
         grid.addWidget(self.api_key, 1, 1)
         grid.addWidget(self.detect_button, 1, 2)
         grid.addWidget(self.model_combo, 1, 3)
-        grid.addWidget(label("模型选择会记忆", "hint"), 1, 4)
+        forget = QPushButton("忘记 Key")
+        forget.clicked.connect(self.forget_key)
+        grid.addWidget(forget, 1, 4)
         grid.setColumnStretch(1, 3)
         grid.setColumnStretch(3, 2)
         self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.model_combo.setMinimumContentsLength(20)
         setup.addLayout(grid)
-        setup.addWidget(label("AI 会发送颜色图和商品图片至 Google；不上传表格与商品编码。API Key 仅本次使用。", "hint"))
+        privacy_row = QHBoxLayout()
+        privacy_row.addWidget(label("图片由 Gemini 识别；不上传表格与商品编码。", "hint"))
+        privacy_row.addStretch()
+        self.key_status = label("Key 将由当前 Windows 账户加密保存", "hint")
+        privacy_row.addWidget(self.key_status)
+        setup.addLayout(privacy_row)
         outer.addWidget(setup_card)
 
         stats = QHBoxLayout()
         self.stats = []
         for heading in ("款号", "商品图片输出数", "已配对颜色 / 总颜色"):
-            frame, layout = card()
-            layout.setContentsMargins(15, 8, 15, 8)
+            frame = QFrame()
+            frame.setObjectName("card")
+            frame.setFixedHeight(40)
+            layout = QHBoxLayout(frame)
+            layout.setContentsMargins(12, 4, 12, 4)
             number = label("—", "number")
             self.stats.append(number)
             layout.addWidget(number)
             layout.addWidget(label(heading, "hint"))
+            layout.addStretch()
             stats.addWidget(frame)
         outer.addLayout(stats)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left_card, left = card()
         left.addWidget(label("款号列表", "section"))
+        self.style_filter = QLineEdit()
+        self.style_filter.setPlaceholderText("搜索款号…")
+        self.style_filter.textChanged.connect(self.filter_styles)
+        left.addWidget(self.style_filter)
         self.style_list = QListWidget()
         self.style_list.currentRowChanged.connect(self.render_style)
+        readable_selection(self.style_list)
         left.addWidget(self.style_list)
         self.style_summary = label("读取表格后显示款号与处理状态。", "hint")
         self.style_summary.setWordWrap(True)
@@ -195,6 +245,7 @@ class Window(QMainWindow):
         splitter.addWidget(left_card)
         right_card, right = card()
         right.setContentsMargins(14, 12, 14, 12)
+        right.setSpacing(6)
         top = QHBoxLayout()
         description = QVBoxLayout()
         self.style_heading = label("颜色配对工作台", "section")
@@ -213,16 +264,27 @@ class Window(QMainWindow):
         self.table.verticalHeader().hide()
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        readable_selection(self.table)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        for column, width in ((0, 94), (1, 56), (2, 108), (4, 84), (5, 66), (6, 132)):
+            self.table.setColumnWidth(column, width)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.cellDoubleClicked.connect(self.preview_row)
         right.addWidget(self.table, 1)
-        right.addWidget(label("商品原图（点击放大，悬停查看 AI 识别理由）", "hint"))
+        gallery_row = QHBoxLayout()
+        gallery_row.addWidget(label("双击行查看原图；名称不同的颜色由你连接。", "hint"))
+        gallery_row.addStretch()
+        self.gallery_toggle = QPushButton("展开原图 ▾")
+        self.gallery_toggle.setCheckable(True)
+        self.gallery_toggle.toggled.connect(self.toggle_gallery)
+        gallery_row.addWidget(self.gallery_toggle)
+        right.addLayout(gallery_row)
         self.gallery = QScrollArea()
         self.gallery.setWidgetResizable(True)
         self.gallery.setFixedHeight(122)
+        self.gallery.hide()
         right.addWidget(self.gallery)
-        right.addWidget(label("¹ 可信度为模型自评，仅供参考；近似颜色请核对预览。双击配对行可查看原图。", "hint"))
+        self.table.horizontalHeaderItem(5).setToolTip("可信度为模型自评，仅供参考；近似颜色请核对原图。")
         splitter.addWidget(right_card)
         splitter.setSizes([205, 1040])
         outer.addWidget(splitter, 1)
@@ -253,13 +315,29 @@ class Window(QMainWindow):
         outer.addLayout(bottom)
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         outer.addWidget(self.progress_bar)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setFixedHeight(66)
+        log_row = QHBoxLayout()
+        self.log_toggle = QPushButton("处理日志 ▾")
+        self.log_toggle.setCheckable(True)
+        log_row.addWidget(self.log_toggle)
+        self.latest_log = label("等待处理…", "hint")
+        self.latest_log.setMinimumWidth(0)
+        self.latest_log.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        log_row.addWidget(self.latest_log, 1)
+        follow = QCheckBox("跟随最新")
+        follow.setChecked(True)
+        log_row.addWidget(follow)
+        outer.addLayout(log_row)
+        self.log = FollowLog()
+        self.log.setFixedHeight(100)
         self.log.setPlaceholderText("处理日志：此处会显示扫描、识别与输出结果。")
+        self.log.hide()
+        self.log_toggle.toggled.connect(self.log.setVisible)
+        follow.toggled.connect(lambda enabled: setattr(self.log, "follow_latest", enabled))
+        self.log.textChanged.connect(self.update_latest_log)
         outer.addWidget(self.log)
         self.busy_widgets = [setup_card, splitter, self.analyze_button, self.retry_button,
                              self.export_button, self.open_button]
@@ -325,18 +403,66 @@ class Window(QMainWindow):
         self._models_verified = False
         self.model_combo.clear()
         self.show_remembered_model()
+        self.key_timer.start()
         self.update_totals()
+
+    def persist_key(self):
+        key = self.api_key.text().strip()
+        if not key:
+            return  # 编辑时暂时清空不删除旧凭据；只有“忘记 Key”会删除。
+        model = self.model_combo.currentData() if self._models_verified else ""
+        try:
+            self.key_store.save(key, model or "")
+            self._saved_key = key
+            self.key_status.setText("Key 已由当前账户加密记忆")
+        except (CredentialError, OSError):
+            self.key_status.setText("系统凭据保存不可用，Key 仅本次使用")
+
+    def forget_key(self):
+        try:
+            self.key_store.forget()
+        except OSError:
+            self.key_status.setText("凭据删除失败，请检查配置目录权限")
+            return
+        self.key_timer.stop()
+        self._saved_key = ""
+        self.api_key.clear()
+        self.key_timer.stop()
+        self.key_status.setText("已忘记 Key")
+
+    def toggle_gallery(self, visible):
+        self.gallery.setVisible(visible)
+        self.gallery_toggle.setText("收起原图 ▴" if visible else "展开原图 ▾")
+
+    def toggle_setup(self, collapsed):
+        self.setup_card.setVisible(not collapsed)
+        self.setup_toggle.setText("资料 / API 设置 ▾" if collapsed else "收起设置 ▴")
+
+    def update_latest_log(self):
+        lines = self.log.toPlainText().splitlines()
+        if lines:
+            self.latest_log.setText(lines[-1][:110])
+            self.latest_log.setToolTip(lines[-1])
+
+    def filter_styles(self):
+        query = self.style_filter.text().strip().casefold()
+        for row in range(self.style_list.count()):
+            item = self.style_list.item(row)
+            item.setHidden(query not in item.text().casefold())
 
     def show_remembered_model(self):
         saved = self.settings.get("model")
         if saved:
-            self.model_combo.addItem(saved.removeprefix("models/") + "（上次选择，待检测）", saved)
+            suffix = "（上次选择）" if self._models_verified else "（上次选择，待检测）"
+            self.model_combo.addItem(saved.removeprefix("models/") + suffix, saved)
             self.model_combo.setCurrentIndex(0)
 
     def model_changed(self):
         model = self.model_combo.currentData()
         if model:
             self.save_setting("model", model)
+            if self._models_verified:
+                self.persist_key()
         self.update_totals()
 
     def detect_models(self):
@@ -416,6 +542,7 @@ class Window(QMainWindow):
                 self.style_list.addItem(f"{style.code}\n{style.sku_count} 个商品  ·  {status}")
         self.style_list.setCurrentRow(max(old, 0) if self.project else -1)
         self.style_list.blockSignals(False)
+        self.filter_styles()
 
     def render_style(self, *_):
         style = self.current_style()
@@ -435,12 +562,14 @@ class Window(QMainWindow):
         self.style_summary.setText(f"{len(style.images)} 张商品原图\n{style.sku_count} 张输出图片\n所有尺码使用该颜色选定的同一张原图。")
         self.table.setRowCount(len(style.colors))
         for row, (color, skus) in enumerate(style.colors.items()):
-            self.table.setRowHeight(row, 52)
+            self.table.setRowHeight(row, 46)
             self.table.setItem(row, 0, QTableWidgetItem(color))
             count = QTableWidgetItem(str(len(skus)))
             count.setToolTip("\n".join(skus))
             self.table.setItem(row, 1, count)
-            combo = QComboBox()
+            combo = ClickOnlyComboBox()
+            readable_selection(combo.view())
+            combo.setMaxVisibleItems(12)
             combo.addItem("请选择对应图片…", "")
             for image in style.images:
                 match = style.matches.get(image.name)
@@ -486,13 +615,22 @@ class Window(QMainWindow):
     def update_row(self, style: Style, color: str, row: int):
         chosen = style.selections.get(color, "")
         match = style.matches.get(chosen)
-        label_text = match.color_label if match else "—"
+        candidates = color_candidates(style, color)
+        pending = candidates[0] if not chosen and candidates else None
+        visible_match = match or pending
+        label_text = visible_match.color_label if visible_match else "—"
         self.table.setItem(row, 2, QTableWidgetItem(label_text or "未确定"))
-        self.table.setItem(row, 5, QTableWidgetItem(f"{match.confidence:.0%}" if match else "—"))
+        self.table.setItem(row, 5, QTableWidgetItem(f"{visible_match.confidence:.0%}" if visible_match else "—"))
         status = "人工连接" if chosen and color in style.manual_colors else "自动配对 · 请核对" if chosen else "待人工连接"
+        if pending:
+            status = "已识别 · 待复核"
         item = QTableWidgetItem(status)
-        item.setForeground(Qt.GlobalColor.darkGreen if chosen else Qt.GlobalColor.darkYellow)
-        item.setToolTip(match.reason if match else "可直接选择任意原图，不必先完成 AI 识别。")
+        item.setForeground(QColor("#168b78") if chosen else QColor("#9b641c"))
+        detail = style.review_notes.get(color, "") or (visible_match.reason if visible_match else "可直接选择任意原图。")
+        if pending:
+            detail = f"候选 {pending.filename}，自评 {pending.confidence:.0%}，复核标记 {pending.needs_review}。\n" + detail
+            self.table.cellWidget(row, 3).setToolTip(detail)
+        item.setToolTip(detail)
         self.table.setItem(row, 6, item)
         preview = QLabel()
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -623,6 +761,7 @@ class Window(QMainWindow):
             self.log.appendPlainText("任务仍在结束中，请稍后再关闭窗口。")
             event.ignore()
         else:
+            self.persist_key()
             event.accept()
 
 

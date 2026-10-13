@@ -8,14 +8,15 @@ from pathlib import Path
 from PySide6.QtCore import QStandardPaths, QTimer, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QMainWindow, QPushButton, QVBoxLayout, QWidget)
+                               QMainWindow, QPushButton, QVBoxLayout, QWidget, QScrollArea)
 
 from color_tool.ui import Job, STYLESHEET, card, label
 from .registry import ROOT, TOOLS, get_tool
+from .branding import mascot
 
 
 class Hub(QMainWindow):
-    def __init__(self, logs: Path | None = None):
+    def __init__(self, logs: Path | None = None, validated_report: dict | None = None):
         super().__init__()
         self.setWindowTitle("大图书馆 · 商品资料工具箱")
         self.setWindowIcon(QIcon(str(ROOT / "assets" / "toolbox.ico")))
@@ -33,7 +34,11 @@ class Hub(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_children)
         self.timer.start(750)
-        QTimer.singleShot(0, self.check_environment)
+        from runtime_probe import validate_report
+        if validated_report and validate_report(validated_report):
+            self.environment_checked(validated_report)
+        else:
+            QTimer.singleShot(0, self.check_environment)
 
     def _build(self):
         central = QWidget()
@@ -47,10 +52,11 @@ class Hub(QMainWindow):
         row.setContentsMargins(25, 20, 25, 20)
         titles = QVBoxLayout()
         titles.addWidget(label("大图书馆 · 商品资料工具箱", "suiteTitle"))
-        titles.addWidget(label("四个独立入口，从资料准备到图片整理", "suiteSubtitle"))
+        titles.addWidget(label("帕秋莉的小书房 · 从资料准备到图片整理", "suiteSubtitle"))
         row.addLayout(titles)
         row.addStretch()
-        row.addWidget(label("TOOLS  /  04", "suiteSubtitle"))
+        row.addWidget(label(f"TOOLS  /  {len(TOOLS):02d}", "suiteSubtitle"))
+        row.addWidget(mascot(78))
         outer.addWidget(header)
         lead = QHBoxLayout()
         lead.addWidget(label("选择今天要处理的工作", "section"))
@@ -82,7 +88,15 @@ class Hub(QMainWindow):
             self.buttons[tool.key] = button
             layout.addWidget(button)
             grid.addWidget(frame, index // 2, index % 2)
-        outer.addLayout(grid, 1)
+        if len(TOOLS) > 4:
+            tools_widget = QWidget()
+            tools_widget.setLayout(grid)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(tools_widget)
+            outer.addWidget(scroll, 1)
+        else:
+            outer.addLayout(grid, 1)
         environment, env = card()
         line = QHBoxLayout()
         line.addWidget(label("运行环境", "section"))
@@ -94,7 +108,7 @@ class Hub(QMainWindow):
         logs.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.logs))))
         line.addWidget(logs)
         env.addLayout(line)
-        self.environment_status = label("正在检查四个工具的界面、表格和图片处理能力…", "hint")
+        self.environment_status = label("正在检查工具的界面、表格和图片处理能力…", "hint")
         self.environment_status.setWordWrap(True)
         env.addWidget(self.environment_status)
         outer.addWidget(environment)
@@ -191,19 +205,26 @@ class Hub(QMainWindow):
 
 
 SUITE_STYLESHEET = STYLESHEET + """
-QFrame#suiteHeader { background: #172844; border-radius: 12px; }
+QFrame#suiteHeader { background: #302341; border-radius: 12px; }
 QLabel#suiteTitle { color: white; font-size: 26px; font-weight: 700; }
 QLabel#suiteSubtitle { color: #c4cee2; }
-QLabel#toolTitle { color: #172844; font-size: 20px; font-weight: 600; }
+QLabel#toolTitle { color: #302341; font-size: 20px; font-weight: 600; }
 """
 
 
-def main():
+def main(validated_runtime: str | None = None):
     app = QApplication(sys.argv)
     app.setOrganizationName("GreatLibrary")
     app.setApplicationName("ProductToolbox")
     app.setStyle("Fusion")
     app.setStyleSheet(SUITE_STYLESHEET)
-    hub = Hub()
+    report = None
+    if validated_runtime:
+        try:
+            import base64, json
+            report = json.loads(base64.b64decode(validated_runtime))
+        except (ValueError, TypeError):
+            pass
+    hub = Hub(validated_report=report)
     hub.show()
     raise SystemExit(app.exec())

@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 class Settings:
-    """只保存非敏感偏好；API Key 只存在当前进程内。"""
+    """只保存非敏感偏好；API Key 由独立的 Windows 凭据存储处理。"""
 
     def __init__(self, path: Path):
         self.path = path
