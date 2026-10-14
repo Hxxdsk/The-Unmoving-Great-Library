@@ -19,7 +19,7 @@ from color_tool.pairing import one_to_one_suggestions
 from suite.cache import ResultCache
 from suite.legacy import load_original, common_ttk_theme
 from suite.materials import validate_material, classify_materials
-from suite.submission import create_input_template
+from suite.submission import create_input_template, classify_image
 from suite.workbook_images import read_images
 from suite.standards import validate_standard
 from suite.joiner_adapter import assign_sides, recognize_sides, filename_hint
@@ -351,6 +351,41 @@ def test_excel_rich_cell_image_metadata_extracted(tmp_path):
     book = load_workbook(source, data_only=True)
     assert read_images(source, book.active, 8, [])[2] == picture.read_bytes()
     book.close()
+
+
+@pytest.mark.parametrize("names", [[], ["外套"], ["", "外套"]])
+def test_gemini_35_image_schema_has_no_empty_enum_and_unknown_stays_blank(
+    tmp_path, names
+):
+    client = ai()
+    client.model = "gemini-3.5-flash-lite"
+    picture = photo(tmp_path / "coat.png", "black")
+    candidates = dict.fromkeys(names, ("CAT", "SUB"))
+
+    def response(parts, schema):
+        for field in ("category_name", "price_name"):
+            assert schema["properties"][field]["enum"]
+            assert all(value.strip() for value in schema["properties"][field]["enum"])
+        return {
+            "category_name": schema["properties"]["category_name"]["enum"][-1],
+            "price_name": schema["properties"]["price_name"]["enum"][-1],
+            "garment_kind": "无法确认",
+            "contact": "无法判断",
+            "confidence": 0.9,
+            "needs_review": False,
+            "reason": "没有可匹配的候选",
+        }
+
+    with patch.object(client, "generate", side_effect=response):
+        result = classify_image(
+            client,
+            picture.read_bytes(),
+            "新名字",
+            (candidates, candidates, {}, {}),
+            {},
+            [],
+        )
+    assert result["category_name"] == result["price_name"] == ""
 
 
 def test_image_assisted_generation_maps_only_master_candidates(tmp_path):

@@ -24,6 +24,12 @@ def classify_image(
     client, data, style, maps, settings, warnings, cache=None, fabric=""
 ):
     categories, prices, _, _ = maps
+    category_names = [name for name in categories if name.strip()]
+    price_names = [name for name in prices if name.strip()]
+    # Gemini 3.5 rejects empty enum entries, including the former no-match value.
+    no_match = "__NO_MATCH__"
+    while no_match in categories or no_match in prices:
+        no_match += "_"
     cache = cache or ResultCache("garment-v1")
     input_data = {
         "model": client.model,
@@ -38,8 +44,8 @@ def classify_image(
     schema = {
         "type": "OBJECT",
         "properties": {
-            "category_name": {"type": "STRING", "enum": ["", *categories]},
-            "price_name": {"type": "STRING", "enum": ["", *prices]},
+            "category_name": {"type": "STRING", "enum": [*category_names, no_match]},
+            "price_name": {"type": "STRING", "enum": [*price_names, no_match]},
             "garment_kind": {"type": "STRING"},
             "contact": {"type": "STRING"},
             "confidence": {"type": "NUMBER"},
@@ -63,12 +69,13 @@ def classify_image(
         "辨认上衣、裤子、外套、针织/梭织、填充服、羽绒服等；结合用户面料文字判断，不从不可见区域编造成分。"
         "面料里的棉不代表填充棉；羽绒/棉填充须有输入标签或清晰可见证据。图中不能确认结构时说明不确定。"
         "contact 描述外穿/贴身或无法判断，不推测不可见的成分、年龄与检测结果。"
-        "confidence 为 0 到 1。拿不准候选则返回空字符串并 needs_review=true。reason 一句说明。数据："
+        f"confidence 为 0 到 1。候选为空或拿不准则对应名称返回 {no_match}，并 needs_review=true。"
+        "reason 一句说明。数据："
         + json.dumps(
             {
                 "用户款式名称": style,
-                "品类候选": list(categories),
-                "中类候选": list(prices),
+                "品类候选": category_names,
+                "中类候选": price_names,
                 "性别设置": settings.get("性别", ""),
                 "面料原文": fabric,
             },
@@ -78,6 +85,11 @@ def classify_image(
     result = cache.get(key)
     if result is None:
         result = client.generate([{"text": prompt}, image_bytes_part(data)], schema)
+    if isinstance(result, dict):
+        result = dict(result)
+        for field in ("category_name", "price_name"):
+            if result.get(field) == no_match:
+                result[field] = ""
     if (
         not isinstance(result, dict)
         or result.get("category_name") not in ["", *categories]
