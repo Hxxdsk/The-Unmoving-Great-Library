@@ -130,6 +130,8 @@ def generate(
     cancel=None,
 ):
     log = log_cb or (lambda text: None)
+    if ai_client is not None:
+        ai_client.log = log
     if Path(output_path).resolve() in {
         Path(input_path).resolve(),
         Path(master_path).resolve(),

@@ -15,9 +15,9 @@ from PySide6.QtWidgets import (
 )
 
 from .data import Project, Style, export_project, list_workbooks, make_plan, read_project, color_candidates, color_key
-from .credentials import KeyStore, CredentialError
 from suite.widgets import ClickOnlyComboBox, FollowLog, readable_selection
-from .gemini import GeminiClient, GeminiError
+from .gemini import GeminiError
+from suite.shared_ai import shared_client
 from .settings import Settings
 
 STYLESHEET = """
@@ -100,7 +100,7 @@ def thumbnail(path: Path, width=110, height=80):
 
 
 class Window(QMainWindow):
-    def __init__(self, settings: Settings | None = None, key_store: KeyStore | None = None):
+    def __init__(self, settings: Settings | None = None, ai_provider=None):
         super().__init__()
         self.setWindowTitle("商品图片 · 颜色配对助手")
         self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "assets" / "logo-color.ico")))
@@ -108,28 +108,11 @@ class Window(QMainWindow):
         self.setMinimumSize(1060, 740)
         self.settings = settings or Settings(Path(QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppConfigLocation)) / "preferences.json")
-        self.key_store = key_store or KeyStore(self.settings.path.with_name("gemini-key.dpapi"))
+        self.ai_provider = ai_provider or shared_client
         self.project: Project | None = None
         self.job: Job | None = None
-        self._models_verified = False
         self.last_output: Path | None = None
-        self._saved_key = ""
-        self.key_timer = QTimer(self)
-        self.key_timer.setSingleShot(True)
-        self.key_timer.setInterval(700)
-        self.key_timer.timeout.connect(self.persist_key)
         self._build()
-        try:
-            self._saved_key = self.key_store.load()
-            self.api_key.blockSignals(True)
-            self.api_key.setText(self._saved_key)
-            self.api_key.blockSignals(False)
-            self._models_verified = bool(self._saved_key and self.settings.get("model") in self.key_store.validated_models)
-            if self._saved_key:
-                self.key_status.setText("Key 已安全恢复")
-        except (CredentialError, OSError):
-            self.key_status.setText("Key 保存不可用，本次仍可使用")
-        self.show_remembered_model()
         saved = self.settings.get("directory")
         if saved and Path(saved).is_dir():
             self.set_directory(Path(saved))
@@ -182,32 +165,17 @@ class Window(QMainWindow):
         grid.addWidget(self.scan_button, 0, 4)
         self.workbook_combo.setPlaceholderText("选择商品表格")
         self.workbook_combo.setToolTip("目录内的商品资料表格；多个表格时在这里选择。")
-        self.api_key = QLineEdit()
-        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key.setPlaceholderText("粘贴 Gemini API Key（Windows 账户加密记忆）")
-        self.api_key.textChanged.connect(self.key_changed)
-        self.detect_button = QPushButton("检测模型")
-        self.detect_button.clicked.connect(self.detect_models)
-        self.model_combo = QComboBox()
-        self.model_combo.setPlaceholderText("输入 Key 后检测可用模型")
-        self.model_combo.currentIndexChanged.connect(self.model_changed)
-        grid.addWidget(label("Gemini Key"), 1, 0)
-        grid.addWidget(self.api_key, 1, 1)
-        grid.addWidget(self.detect_button, 1, 2)
-        grid.addWidget(self.model_combo, 1, 3)
-        forget = QPushButton("忘记 Key")
-        forget.clicked.connect(self.forget_key)
-        grid.addWidget(forget, 1, 4)
+        self.ai_enabled = QCheckBox("启用 AI")
+        self.ai_enabled.setChecked(True)
+        self.ai_enabled.toggled.connect(self.update_totals)
+        grid.addWidget(self.ai_enabled, 1, 0)
+        grid.addWidget(label("API / 模型在工具箱首页统一设置", "hint"), 1, 1, 1, 4)
         grid.setColumnStretch(1, 3)
         grid.setColumnStretch(3, 2)
-        self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.model_combo.setMinimumContentsLength(20)
         setup.addLayout(grid)
         privacy_row = QHBoxLayout()
         privacy_row.addWidget(label("无 Key 也可手动配对后输出。", "hint"))
         privacy_row.addStretch()
-        self.key_status = label("Key 将由当前 Windows 账户加密保存", "hint")
-        privacy_row.addWidget(self.key_status)
         setup.addLayout(privacy_row)
         outer.addWidget(setup_card)
 
@@ -402,44 +370,13 @@ class Window(QMainWindow):
                 self.log.appendPlainText(f"{style.code}：{'；'.join(style.issues)}")
         self.update_totals()
 
-    def key_changed(self):
-        self._models_verified = False
-        self.model_combo.clear()
-        self.show_remembered_model()
-        self.key_timer.start()
-        self.update_totals()
-
-    def persist_key(self):
-        key = self.api_key.text().strip()
-        if not key:
-            return  # 编辑时暂时清空不删除旧凭据；只有“忘记 Key”会删除。
-        model = self.model_combo.currentData() if self._models_verified else ""
-        try:
-            self.key_store.save(key, model or "")
-            self._saved_key = key
-            self.key_status.setText("Key 已由当前账户加密记忆")
-        except (CredentialError, OSError):
-            self.key_status.setText("系统凭据保存不可用，Key 仅本次使用")
-
-    def forget_key(self):
-        try:
-            self.key_store.forget()
-        except OSError:
-            self.key_status.setText("凭据删除失败，请检查配置目录权限")
-            return
-        self.key_timer.stop()
-        self._saved_key = ""
-        self.api_key.clear()
-        self.key_timer.stop()
-        self.key_status.setText("已忘记 Key")
-
     def toggle_gallery(self, visible):
         self.gallery.setVisible(visible)
         self.gallery_toggle.setText("收起原图 ▴" if visible else "展开原图 ▾")
 
     def toggle_setup(self, collapsed):
         self.setup_card.setVisible(not collapsed)
-        self.setup_toggle.setText("资料 / API 设置 ▾" if collapsed else "收起设置 ▴")
+        self.setup_toggle.setText("资料设置 ▾" if collapsed else "收起设置 ▴")
 
     def update_latest_log(self):
         lines = self.log.toPlainText().splitlines()
@@ -453,44 +390,6 @@ class Window(QMainWindow):
             item = self.style_list.item(row)
             item.setHidden(query not in item.text().casefold())
 
-    def show_remembered_model(self):
-        saved = self.settings.get("model")
-        if saved:
-            suffix = "（上次选择）" if self._models_verified else "（上次选择，待检测）"
-            self.model_combo.addItem(saved.removeprefix("models/") + suffix, saved)
-            self.model_combo.setCurrentIndex(0)
-
-    def model_changed(self):
-        model = self.model_combo.currentData()
-        if model:
-            self.save_setting("model", model)
-            if self._models_verified:
-                self.persist_key()
-        self.update_totals()
-
-    def detect_models(self):
-        key = self.api_key.text().strip()
-        if not key:
-            self.error("请先粘贴 Gemini API Key。")
-            return
-        self.log.appendPlainText("正在查询此 Key 的可用内容生成模型…")
-        self.run_job(lambda cancel, *_: GeminiClient(key, cancel=cancel).list_models(), self.models_detected)
-
-    def models_detected(self, models):
-        saved = self.settings.get("model")
-        self.model_combo.blockSignals(True)
-        self.model_combo.clear()
-        for model in models:
-            self.model_combo.addItem(f"{model['display_name']}  ·  {model['name'].removeprefix('models/')}", model["name"])
-        index = self.model_combo.findData(saved)
-        if index < 0:
-            index = self.model_combo.findData("models/gemini-2.5-flash")
-        self.model_combo.setCurrentIndex(max(index, 0))
-        self._models_verified = True
-        self.model_combo.blockSignals(False)
-        self.model_changed()
-        self.log.appendPlainText(f"检测到 {len(models)} 个模型。图片与 JSON 能力会在识别时实际验证；上次选择已恢复（如仍可用）。")
-
     def current_style(self) -> Style | None:
         index = self.style_list.currentRow()
         if self.project and 0 <= index < len(self.project.styles):
@@ -500,9 +399,12 @@ class Window(QMainWindow):
     def analyze(self, checked=False, current_only=False):
         if not self.project:
             return
-        key, model = self.api_key.text().strip(), self.model_combo.currentData()
-        if not key or not model or not self._models_verified:
-            self.error("请先输入 API Key、检测模型并选择一个模型。")
+        if not self.ai_enabled.isChecked():
+            return
+        try:
+            client = self.ai_provider()
+        except GeminiError as exc:
+            self.error(str(exc))
             return
         styles = [self.current_style()] if current_only else self.project.styles
         styles = [style for style in styles if style and not style.issues and not style.ai_issues and style.chart]
@@ -511,8 +413,10 @@ class Window(QMainWindow):
             return
 
         def work(cancel, log, progress):
-            client = GeminiClient(key, model, cancel)
+            client.cancel = cancel
+            client.log = log
             succeeded = 0
+
             def analyze_one(style):
                 try:
                     client.analyze_style(style, log, force=current_only)
@@ -522,6 +426,7 @@ class Window(QMainWindow):
                     style.analysis_error = str(exc)
                     log(f"{style.code}：{exc}")
                     return 0
+
             with ThreadPoolExecutor(max_workers=2) as pool:
                 futures = [pool.submit(analyze_one, style) for style in styles]
                 for index, future in enumerate(as_completed(futures), 1):
@@ -675,8 +580,14 @@ class Window(QMainWindow):
             ready = False
         if self.job:
             return
-        ai_ready = bool(self.project and any(s.chart and not s.issues and not s.ai_issues for s in self.project.styles)
-                        and self.api_key.text().strip() and self.model_combo.currentData() and self._models_verified)
+        ai_ready = bool(
+            self.project
+            and any(
+                s.chart and not s.issues and not s.ai_issues
+                for s in self.project.styles
+            )
+            and self.ai_enabled.isChecked()
+        )
         self.analyze_button.setEnabled(ai_ready)
         current = self.current_style()
         self.retry_button.setEnabled(bool(ai_ready and current and current.chart and not current.ai_issues and not current.issues))
@@ -788,7 +699,6 @@ class Window(QMainWindow):
             self.log.appendPlainText("任务仍在结束中，请稍后再关闭窗口。")
             event.ignore()
         else:
-            self.persist_key()
             event.accept()
 
 

@@ -20,13 +20,18 @@ class Hub(QMainWindow):
         super().__init__()
         self.setWindowTitle("大图书馆 · 商品资料工具箱")
         self.setWindowIcon(QIcon(str(ROOT / "assets" / "toolbox.ico")))
-        self.resize(1100, 800)
-        self.setMinimumSize(950, 730)
+        self.resize(1100, 880)
+        self.setMinimumSize(950, 790)
         self.processes = {}
         self.log_files = {}
         self.buttons = {}
         self.tool_status = {}
         self.job = None
+        from .shared_ai import PoolManager, PoolBroker
+
+        self.ai_manager = PoolManager()
+        self.ai_broker = PoolBroker(self.ai_manager)
+        self._closing = False
         base = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation))
         self.logs = logs or (base / "GreatLibraryToolbox" / "logs")
         self.logs.mkdir(parents=True, exist_ok=True)
@@ -35,6 +40,7 @@ class Hub(QMainWindow):
         self.timer.timeout.connect(self.poll_children)
         self.timer.start(750)
         from runtime_probe import validate_report
+
         if validated_report and validate_report(validated_report):
             self.environment_checked(validated_report)
         else:
@@ -57,6 +63,17 @@ class Hub(QMainWindow):
         row.addStretch()
         row.addWidget(mascot(78))
         outer.addWidget(header)
+        ai_card, ai_layout = card()
+        ai_row = QHBoxLayout()
+        ai_row.addWidget(label("通用 AI", "section"))
+        self.ai_status = label("", "hint")
+        ai_row.addWidget(self.ai_status, 1)
+        configure = QPushButton("API / 模型 · 管理")
+        configure.clicked.connect(self.configure_ai)
+        ai_row.addWidget(configure)
+        ai_layout.addLayout(ai_row)
+        outer.addWidget(ai_card)
+        self.refresh_ai()
         lead = QHBoxLayout()
         lead.addWidget(label("工具", "section"))
         lead.addStretch()
@@ -169,9 +186,17 @@ class Hub(QMainWindow):
         stream = path.open("ab")
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         try:
-            process = subprocess.Popen([sys.executable, str(ROOT / "suite_entry.py"), "--tool", key],
-                                       cwd=ROOT, stdout=stream, stderr=stream, creationflags=flags,
-                                       start_new_session=os.name != "nt")
+            environment = os.environ.copy()
+            environment.update(self.ai_broker.environment())
+            process = subprocess.Popen(
+                [sys.executable, str(ROOT / "suite_entry.py"), "--tool", key],
+                cwd=ROOT,
+                stdout=stream,
+                stderr=stream,
+                creationflags=flags,
+                env=environment,
+                start_new_session=os.name != "nt",
+            )
         finally:
             stream.close()
         self.processes[key] = process
@@ -189,14 +214,38 @@ class Hub(QMainWindow):
             self.tool_status[key].setText("环境就绪" if code == 0 else "已退出 · 查看日志")
             if code:
                 self.footer.setText(get_tool(key).title + f" 异常退出（{code}），详情位于 {self.logs / (key + '.log')}")
+        if self._closing and not self.processes:
+            self.close()
+
+    def configure_ai(self):
+        from .ai_dialog import AISettingsDialog
+
+        dialog = AISettingsDialog(self.ai_manager, self)
+        dialog.exec()
+        dialog.deleteLater()
+        self.refresh_ai()
+
+    def refresh_ai(self):
+        data = self.ai_manager.snapshot()
+        count = sum(data["model"] in entry["models"] for entry in data["entries"])
+        self.ai_status.setText(
+            f"{data['model'].removeprefix('models/')} · {count} 条 API 轮询"
+            if count
+            else "新增 API → 检测 → 选择模型"
+        )
 
     def closeEvent(self, event):
         if self.job and self.job.isRunning():
             self.footer.setText("正在完成环境检测，请稍后关闭首页。")
             event.ignore()
         else:
-            # Popen 子进程不会因首页销毁而退出。
-            event.accept()
+            if any(process.poll() is None for process in self.processes.values()):
+                self._closing = True
+                self.hide()
+                event.ignore()
+            else:
+                self.ai_broker.close()
+                event.accept()
 
 
 SUITE_STYLESHEET = STYLESHEET + """

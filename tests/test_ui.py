@@ -66,33 +66,49 @@ def test_manual_ui_scan_and_export_six_copies(app, tmp_path):
         wait_job(app, window)
     assert len(list((window.last_output / "CYMY9692").glob("*.jpg"))) == 6
     assert window.open_button.isEnabled()
-    assert window.api_key.text() == ""
+    assert not hasattr(window, "api_key") and not hasattr(window, "model_combo")
     window.close()
 
 
-def test_model_detection_restores_saved_selection(app, tmp_path):
-    window = setup_window(tmp_path)
-    window.settings.set("model", "models/gemini-pro")
-    window.api_key.setText("test-key")
+def test_shared_model_detection_and_selection_on_home_dialog(app, tmp_path):
+    from suite.ai_dialog import AISettingsDialog
+    from suite.shared_ai import PoolManager, PoolStore
+
+    values = {}
+
+    def codec(data, decrypt=False):
+        if decrypt:
+            return values[data]
+        token = b"protected-" + str(len(values)).encode()
+        values[token] = data
+        return token
+
+    manager = PoolManager(PoolStore(tmp_path / "pool.dpapi", codec))
+    identifier = manager.add("test-key")
     models = [{"name": "models/gemini-flash", "display_name": "Flash"}, {"name": "models/gemini-pro", "display_name": "Pro"}]
-    with patch("color_tool.ui.GeminiClient.list_models", return_value=models):
-        window.detect_button.click()
-        wait_job(app, window)
-    assert window.model_combo.currentData() == "models/gemini-pro"
-    window.model_combo.setCurrentIndex(0)
-    assert Settings(window.settings.path).get("model") == "models/gemini-flash"
-    assert "test-key" not in window.settings.path.read_text()
-    window.close()
+    manager.detected(identifier, models)
+    manager.select(model="models/gemini-pro")
+    dialog = AISettingsDialog(manager)
+    with patch("color_tool.gemini.GeminiClient.list_models", return_value=models):
+        dialog.detect_button.click()
+        wait_job(app, dialog)
+    assert dialog.models.currentData() == "models/gemini-pro"
+    dialog.models.setCurrentIndex(dialog.models.findData("models/gemini-flash"))
+    assert manager.snapshot()["model"] == "models/gemini-flash"
+    dialog.close()
 
 
-def test_saved_model_visible_on_launch_and_requires_detection(app, tmp_path):
-    settings = Settings(tmp_path / "preferences.json")
-    settings.set("model", "models/gemini-pro")
-    window = Window(settings)
-    assert window.model_combo.currentData() == "models/gemini-pro"
-    assert "上次选择" in window.model_combo.currentText()
-    assert not window._models_verified
+def test_color_window_has_only_ai_switch_and_keeps_manual_workflow(app, tmp_path):
+    window = setup_window(tmp_path)
+    window.scan_button.click()
+    wait_job(app, window)
+    assert not hasattr(window, "model_combo") and not hasattr(window, "api_key")
+    assert window.analyze_button.isEnabled()
+    window.ai_enabled.setChecked(False)
     assert not window.analyze_button.isEnabled()
+    combo = window.table.cellWidget(0, 3)
+    combo.setCurrentIndex(combo.findData("2.jpg"))
+    assert window.export_button.isEnabled()
     window.close()
 
 

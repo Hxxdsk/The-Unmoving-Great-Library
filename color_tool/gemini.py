@@ -9,6 +9,8 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.utils import parsedate_to_datetime
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -21,6 +23,35 @@ API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 
 class GeminiError(RuntimeError):
     pass
+
+
+class GeminiHTTPError(GeminiError):
+    def __init__(self, message, status, retry_after=60):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+
+
+def retry_delay(headers, error):
+    delay = None
+    value = (headers or {}).get("Retry-After")
+    if value:
+        try:
+            delay = float(value)
+        except (TypeError, ValueError):
+            try:
+                delay = parsedate_to_datetime(value).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                pass
+    for item in error.get("details", []) if isinstance(error, dict) else []:
+        if isinstance(item, dict) and item.get("@type", "").endswith("RetryInfo"):
+            try:
+                delay = max(
+                    delay or 0, float(str(item.get("retryDelay", "")).removesuffix("s"))
+                )
+            except ValueError:
+                pass
+    return min(86400, max(1, delay)) if delay is not None and math.isfinite(delay) else 60
 
 
 def image_part(path: Path, max_side: int = 1536) -> dict:
@@ -89,10 +120,17 @@ MATCH_SCHEMA = {
 
 
 class GeminiClient:
-    def __init__(self, api_key: str, model: str = "", cancel: threading.Event | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "",
+        cancel: threading.Event | None = None,
+        retry_rate_limit=True,
+    ):
         self.api_key = api_key.strip()
         self.model = model
         self.cancel = cancel if cancel is not None else threading.Event()
+        self.retry_rate_limit = retry_rate_limit
         if not self.api_key:
             raise GeminiError("请先输入 Gemini API Key。")
         if any(ord(character) < 33 or ord(character) > 126 for character in self.api_key):
@@ -117,19 +155,28 @@ class GeminiClient:
                     raise GeminiError("Gemini API 返回格式错误。")
                 return result
             except urllib.error.HTTPError as exc:
+                error = {}
                 try:
                     error = json.loads(exc.read(16384)).get("error", {})
                     detail = str(error.get("message", ""))[:500].replace(self.api_key, "[已隐藏]")
                 except (ValueError, AttributeError):
                     detail = ""
-                if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                if (
+                    exc.code in (500, 502, 503, 504)
+                    or exc.code == 429
+                    and self.retry_rate_limit
+                ) and attempt < 2:
                     if self.cancel.wait(2 ** (attempt + 1)):
                         self.check_cancel()
                     continue
                 messages = {400: "请求参数或模型能力不兼容", 401: "API Key 无效",
                             403: "Key 权限、地区或 API 访问受限", 404: "模型不存在或无权访问",
                             429: "请求频率或额度受限", 503: "Gemini 服务暂不可用"}
-                raise GeminiError(f"Gemini HTTP {exc.code}：{messages.get(exc.code, '请求失败')}。{detail}") from None
+                raise GeminiHTTPError(
+                    f"Gemini HTTP {exc.code}：{messages.get(exc.code, '请求失败')}。{detail}",
+                    exc.code,
+                    retry_delay(exc.headers, error),
+                ) from None
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 reason = str(getattr(exc, "reason", exc))[:300].replace(self.api_key, "[已隐藏]")
                 raise GeminiError(f"无法连接 Gemini：{reason}。检查网络能否访问 generativelanguage.googleapis.com。") from None

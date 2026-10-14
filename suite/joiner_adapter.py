@@ -66,6 +66,7 @@ def validate_sides(result, count):
 
 
 def recognize_sides(client, items, log=lambda text: None, force=False, cache=None):
+    client.log = log
     cache = cache or ResultCache("sides-v1")
     for offset in range(0, len(items), 8):
         client.check_cancel()
@@ -362,7 +363,9 @@ def apply(module):
             return
         client = self.ai_panel.client(self.task.cancel)
         if not client:
-            self.ai_panel.status.set("请填入 Key 并检测模型")
+            self.status_text.set(
+                self.ai_panel.status.get() or "请在工具箱主页配置 API / 模型，并开启 AI"
+            )
             return
         items = [dict(item) for item in self.image_list]
         self._loading = True

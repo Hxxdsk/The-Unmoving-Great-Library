@@ -42,21 +42,21 @@ def fake_codec():
     return codec
 
 
-def test_saved_key_and_validated_model_restore_without_plaintext(app, tmp_path):
+def test_legacy_key_is_migrated_to_shared_encrypted_pool(app, tmp_path):
+    from suite.shared_ai import PoolManager, PoolStore
+
     settings = Settings(tmp_path / "preferences.json")
     settings.set("model", "models/gemini-test")
-    store = KeyStore(tmp_path / "key.dpapi", fake_codec())
+    codec = fake_codec()
+    store = KeyStore(tmp_path / "gemini-key.dpapi", codec)
     store.save("fixture-gemini-key", "models/gemini-test")
-    window = Window(settings, store)
-    assert window.api_key.text() == "fixture-gemini-key"
-    assert window._models_verified
-    window.api_key.clear()
-    window.persist_key()
-    assert store.load() == "fixture-gemini-key"  # 临时清空不会忘记之前保存的 Key。
-    window.forget_key()
+    manager = PoolManager(PoolStore(tmp_path / "gemini-pool.dpapi", codec))
+    manager.select(model="models/gemini-test")
+    assert manager.snapshot()["entries"][0]["key"] == "fixture-gemini-key"
+    assert manager.snapshot()["model"] == "models/gemini-test"
     assert not store.path.exists()
+    assert b"fixture-gemini-key" not in manager.store.path.read_bytes()
     assert "fixture-gemini-key" not in settings.path.read_text()
-    window.close()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="DPAPI 需要 Windows")

@@ -129,6 +129,8 @@ def apply(module):
         self._set_status("生成中", "running")
         if auto_reason != "color_update":
             self.clear_log()
+        if not client and self.ai_panel.enabled.get():
+            self.log(self.ai_panel.status.get(), "warning")
         self.log("开始生成" + ("（AI 已启用）" if client else "（本地规则，原文分列）"))
 
         def work(cancel, log):
