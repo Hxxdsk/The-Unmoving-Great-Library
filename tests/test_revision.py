@@ -113,22 +113,21 @@ def test_log_follows_latest_and_can_pause(app):
     log.close()
 
 
-def test_low_confidence_black_gets_focused_review(tmp_path):
+def test_black_candidate_is_marked_for_review_in_one_request(tmp_path):
     chart, image = tmp_path / "颜色.png", tmp_path / "2.jpg"
     Image.new("RGB", (40, 40), "white").save(chart)
     Image.new("RGB", (40, 40), "black").save(image)
     style = Style("A", colors={"黑色": ["sku"]}, folder=tmp_path, chart=chart, images=[image])
     first = {"filename": "2.jpg", "color_label": "黑色", "main_color": "黑色", "confidence": .82,
              "needs_review": True, "reason": "反光造成不确定"}
-    reviewed = dict(first, confidence=.97, needs_review=False, reason="主体黑色，灰色为反光")
-    replies = [{"colors": [{"label": "黑色", "description": "黑色衣服"}]},
-               {"images": [first]}, {"images": [reviewed]}]
+    reply = {"colors": [{"label": "黑色", "description": "黑色衣服"}], "images": [first], "alternatives": []}
     client = GeminiClient("test-key", "models/gemini-test")
-    with patch.object(client, "generate", side_effect=replies) as generate:
-        client.analyze_style(style)
-    assert generate.call_count == 3
+    with patch.object(client, "generate", return_value=reply) as generate:
+        client.analyze_style(style, force=True)
+    assert generate.call_count == 1
     assert style.selections == {"黑色": "2.jpg"}
-    assert "单图复核" in style.review_notes["黑色"]
+    assert "待核对" in style.review_notes["黑色"]
+    assert "黑色" in style.suggested_colors
 
 
 def test_uncertain_review_does_not_force_black_match(tmp_path):
@@ -138,12 +137,12 @@ def test_uncertain_review_does_not_force_black_match(tmp_path):
     style = Style("A", colors={"黑色": ["sku"]}, folder=tmp_path, chart=chart, images=[image])
     uncertain = {"filename": "2.jpg", "color_label": "黑色", "main_color": "深蓝或黑色", "confidence": .6,
                  "needs_review": True, "reason": "黑色和深蓝不能确认"}
-    with patch.object(GeminiClient, "generate", side_effect=[
-            {"colors": [{"label": "黑色", "description": "黑"}]},
-            {"images": [uncertain]}, {"images": [uncertain]}]):
-        GeminiClient("test-key", "models/gemini-test").analyze_style(style)
-    assert not style.selections
-    assert "仍需确认" in style.review_notes["黑色"]
+    with patch.object(GeminiClient, "generate", return_value={
+            "colors": [{"label": "黑色", "description": "黑"}], "images": [uncertain], "alternatives": []}):
+        GeminiClient("test-key", "models/gemini-test").analyze_style(style, force=True)
+    assert style.suggested_colors == {"黑色"}
+    assert style.matches["2.jpg"].needs_review
+    assert "待核对" in style.review_notes["黑色"]
 
 
 def test_recent_validation_only_reused_for_same_source_and_python():
@@ -174,3 +173,14 @@ def test_hub_reuses_fresh_native_validation_without_second_probe(app, tmp_path):
         probe.assert_not_called()
         assert all(button.isEnabled() for button in hub.buttons.values())
         hub.close()
+
+
+def test_shared_key_retains_independent_validated_models(tmp_path):
+    store = KeyStore(tmp_path / "key.dpapi", fake_codec())
+    store.save("first-key", "models/color-model")
+    store.save("first-key", "models/generator-model")
+    assert store.load() == "first-key"
+    assert store.validated_models == {"models/color-model", "models/generator-model"}
+    store.save("changed-key", "models/second-account")
+    assert store.load() == "changed-key"
+    assert store.validated_models == {"models/second-account"}

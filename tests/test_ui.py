@@ -94,3 +94,20 @@ def test_saved_model_visible_on_launch_and_requires_detection(app, tmp_path):
     assert not window._models_verified
     assert not window.analyze_button.isEnabled()
     window.close()
+
+
+def test_manual_output_button_without_color_chart_or_key(app, tmp_path):
+    window = setup_window(tmp_path)
+    (tmp_path / "CYMY9692" / "颜色.png").unlink()
+    window.scan_button.click()
+    wait_job(app, window)
+    assert window.project.styles[0].ai_issues
+    assert not window.analyze_button.isEnabled()
+    combo = window.table.cellWidget(0, 3)
+    combo.setCurrentIndex(combo.findData("2.jpg"))
+    assert window.export_button.isEnabled()
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+        window.export_button.click()
+        wait_job(app, window)
+    assert len(list((window.last_output / "CYMY9692").glob("*.jpg"))) == 6
+    window.close()

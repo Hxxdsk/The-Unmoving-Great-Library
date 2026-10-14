@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import uuid
 from pathlib import Path
 
 
@@ -24,19 +25,43 @@ def _dpapi(data: bytes, decrypt: bool = False) -> bytes:
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     protect = crypt.CryptProtectData
     unprotect = crypt.CryptUnprotectData
-    protect.argtypes = [ctypes.POINTER(Blob), wintypes.LPCWSTR, ctypes.POINTER(Blob),
-                        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
-    unprotect.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.POINTER(Blob),
-                          ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+    protect.argtypes = [
+        ctypes.POINTER(Blob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(Blob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(Blob),
+    ]
+    unprotect.argtypes = [
+        ctypes.POINTER(Blob),
+        ctypes.c_void_p,
+        ctypes.POINTER(Blob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(Blob),
+    ]
     protect.restype = unprotect.restype = wintypes.BOOL
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     kernel.LocalFree.restype = ctypes.c_void_p
     buffer = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
     source, output = Blob(len(data), buffer), Blob()
     if decrypt:
-        success = unprotect(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(output))
+        success = unprotect(
+            ctypes.byref(source), None, None, None, None, 1, ctypes.byref(output)
+        )
     else:
-        success = protect(ctypes.byref(source), "GreatLibrary Gemini Key", None, None, None, 1, ctypes.byref(output))
+        success = protect(
+            ctypes.byref(source),
+            "GreatLibrary Gemini Key",
+            None,
+            None,
+            None,
+            1,
+            ctypes.byref(output),
+        )
     if not success:
         raise CredentialError(f"Windows 凭据保护失败（{ctypes.get_last_error()}）。")
     try:
@@ -50,30 +75,71 @@ class KeyStore:
         self.path = path
         self.codec = codec
         self.validated_model = ""
+        self.validated_models = set()
 
     def load(self) -> str:
         if not self.path.exists():
+            self.validated_model, self.validated_models = "", set()
             return ""
         try:
-            payload = json.loads(self.codec(self.path.read_bytes(), True).decode("utf-8"))
-            if (not isinstance(payload, dict) or not isinstance(payload.get("key"), str)
-                    or not isinstance(payload.get("validated_model", ""), str)):
+            payload = json.loads(
+                self.codec(self.path.read_bytes(), True).decode("utf-8")
+            )
+            if (
+                not isinstance(payload, dict)
+                or not isinstance(payload.get("key"), str)
+                or not isinstance(payload.get("validated_model", ""), str)
+                or not isinstance(payload.get("validated_models", []), list)
+                or any(
+                    not isinstance(model, str)
+                    for model in payload.get("validated_models", [])
+                )
+            ):
                 raise ValueError("invalid credential record")
             self.validated_model = payload.get("validated_model", "")
+            self.validated_models = set(payload.get("validated_models", []))
+            if self.validated_model:
+                self.validated_models.add(self.validated_model)
             return payload["key"]
         except (OSError, ValueError) as exc:
-            raise CredentialError("保存的 Key 无法读取，请在当前账户重新填写。") from exc
+            raise CredentialError(
+                "保存的 Key 无法读取，请在当前账户重新填写。"
+            ) from exc
 
     def save(self, key: str, validated_model: str = ""):
         if not key.strip():
             return
-        payload = json.dumps({"key": key.strip(), "validated_model": validated_model}).encode("utf-8")
+        models = set()
+        try:
+            if self.load() == key.strip():
+                models.update(self.validated_models)
+        except (CredentialError, OSError):
+            pass
+        if validated_model:
+            models.add(validated_model)
+        payload = json.dumps(
+            {
+                "key": key.strip(),
+                "validated_model": validated_model,
+                "validated_models": sorted(models),
+            }
+        ).encode("utf-8")
         encoded = self.codec(payload, False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_bytes(encoded)
-        temporary.replace(self.path)
+        temporary = self.path.with_name(
+            self.path.stem + "_" + uuid.uuid4().hex + ".tmp"
+        )
+        try:
+            temporary.write_bytes(encoded)
+            temporary.replace(self.path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         self.validated_model = validated_model
+        self.validated_models = models
 
     def forget(self):
         self.path.unlink(missing_ok=True)
+        self.validated_model, self.validated_models = "", set()

@@ -47,6 +47,10 @@ class Style:
     manual_colors: set[str] = field(default_factory=set)
     analysis_error: str = ""
     review_notes: dict[str, str] = field(default_factory=dict)
+    ai_issues: list[str] = field(default_factory=list)
+    suggested_colors: set[str] = field(default_factory=set)
+    name_mismatches: dict[str, str] = field(default_factory=dict)
+    pair_confidences: dict[str, float] = field(default_factory=dict)
 
     @property
     def sku_count(self) -> int:
@@ -178,7 +182,7 @@ def read_project(root: Path, workbook: Path) -> Project:
             continue
         charts = [p for p in files if normalized(p.stem) == "颜色"]
         if len(charts) != 1:
-            style.issues.append("需要一张名为“颜色”的图片。" if not charts else "有多张“颜色”图片，请仅保留一张。")
+            style.ai_issues.append("AI 需要一张名为“颜色”的图片。" if not charts else "有多张“颜色”图片，AI 识别前请仅保留一张。")
         else:
             style.chart = charts[0]
         style.images = [p for p in files if normalized(p.stem) != "颜色"]
@@ -189,6 +193,7 @@ def read_project(root: Path, workbook: Path) -> Project:
 
 def apply_suggestions(style: Style) -> None:
     """仅名称明确相同且视觉配对可信时自动连接，保留人工选择。"""
+    used = {style.selections[color] for color in style.manual_colors if color in style.selections}
     for color in style.colors:
         if color in style.manual_colors:
             continue
@@ -197,10 +202,11 @@ def apply_suggestions(style: Style) -> None:
         if len(labels) != 1:
             continue
         matches = [m for m in style.matches.values()
-                   if m.color_label == labels[0] and m.confidence >= 0.88 and not m.needs_review]
+                   if m.color_label == labels[0] and m.confidence >= 0.88 and not m.needs_review and m.filename not in used]
         if matches:
             best = max(matches, key=lambda m: m.confidence)
             style.selections[color] = best.filename
+            used.add(best.filename)
 
 
 def color_candidates(style: Style, color: str) -> list[ImageMatch]:
@@ -216,20 +222,30 @@ class CopyItem:
     sku: str
     source: Path
     target: Path
+    chart_label: str = ""
+    note: str = ""
 
 
-def make_plan(project: Project) -> list[CopyItem]:
+def make_plan(project: Project, partial=False) -> list[CopyItem]:
     plan = []
     names = set()
     for style in project.styles:
         if style.issues:
+            if partial:
+                continue
             raise ValidationError(f"{style.code}：{'；'.join(style.issues)}")
         allowed = {p.name: p for p in style.images}
+        used_sources = set()
         for color, skus in style.colors.items():
             chosen = style.selections.get(color)
+            if partial and not chosen:
+                continue
             if chosen not in allowed:
                 raise ValidationError(f"{style.code} / {color} 还没有选择图片。")
             source = allowed[chosen]
+            if chosen in used_sources:
+                raise ValidationError(f"{style.code}：不同颜色不能重复使用同一张原图。")
+            used_sources.add(chosen)
             if not source.is_file() or not source.resolve().is_relative_to(style.folder):
                 raise ValidationError(f"原图已移走或链接到目录外：{source.name}")
             for sku in skus:
@@ -237,7 +253,9 @@ def make_plan(project: Project) -> list[CopyItem]:
                 if normalized(str(target)) in names:
                     raise ValidationError(f"存在重复输出文件名：{target}")
                 names.add(normalized(str(target)))
-                plan.append(CopyItem(style.code, color, sku, source, target))
+                match = style.matches.get(chosen)
+                plan.append(CopyItem(style.code, color, sku, source, target,
+                                     match.color_label if match else "", style.review_notes.get(color, "")))
     return plan
 
 
@@ -270,12 +288,13 @@ def export_project(project: Project, plan: list[CopyItem], cancel=None,
                 raise ValidationError(f"复制期间原图发生变化：{item.source.name}，请重新操作。")
             digest = hashlib.sha256(destination.read_bytes()).hexdigest()
             records.append({"款号": item.style, "表格颜色": item.color, "商品编码": item.sku,
-                            "原图": str(item.source), "输出文件": str(item.target), "SHA256": digest})
+                            "原图": str(item.source), "输出文件": str(item.target), "SHA256": digest,
+                            "颜色图名称": item.chart_label, "核对备注": item.note})
             progress(index, len(plan))
         if cancel is not None and cancel.is_set():
             raise ValidationError("已取消输出，临时文件已清理。")
         with (stage / "配对记录.csv").open("w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["款号", "表格颜色", "商品编码", "原图", "输出文件", "SHA256"])
+            writer = csv.DictWriter(f, fieldnames=["款号", "表格颜色", "商品编码", "原图", "输出文件", "SHA256", "颜色图名称", "核对备注"])
             writer.writeheader()
             for record in records:
                 writer.writerow({k: "'" + v if v.startswith(("=", "+", "-", "@")) else v for k, v in record.items()})

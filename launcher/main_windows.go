@@ -189,8 +189,8 @@ func drawMain(dc uintptr) {
 		user32.NewProc("DrawIconEx").Call(dc, 43, 34, appIcon, 72, 72, 0, 0, 3)
 	}
 	text(dc, "大图书馆 · 商品资料工具箱", rect{134, 38, 885, 75}, titleFont, "#ffffff", 0)
-	text(dc, "帕秋莉的小书房  /  仅补齐缺失的运行环境", rect{135, 82, 880, 108}, font, "#e5d8f3", 0)
-	text(dc, "检测实际运行能力，优先使用你已有的 Python", rect{28, 139, 902, 170}, headingFont, "#302341", 0)
+	text(dc, "环境检测  →  补齐缺失运行库  →  打开工具箱", rect{135, 82, 880, 108}, font, "#e5d8f3", 0)
+	text(dc, "准备运行环境", rect{28, 139, 902, 170}, headingFont, "#302341", 0)
 	labels := []string{"01  发现 Python", "02  能力检测", "03  下载与修复", "04  进入工具箱"}
 	for n, name := range labels {
 		left := int32(24 + n*228)
@@ -210,7 +210,6 @@ func drawMain(dc uintptr) {
 		rounded(dc, rect{43, 315, 43 + int32(857*pct/100), 322}, "#8365bb", 6)
 	}
 	text(dc, "处理日志", rect{26, 354, 891, 381}, headingFont, "#302341", 0)
-	text(dc, "缺失依赖仅安装到工具箱专用环境；现有系统 Python 包保持不变。", rect{28, 642, 895, 666}, font, "#6d7a8f", 0)
 }
 
 func drawButton(item *drawItem) {
@@ -435,6 +434,11 @@ func main() {
 		icon = 0
 	}
 	appIcon = icon
+	largeIcon, _, _ := user32.NewProc("LoadImageW").Call(instance, 1, 1, 72, 72, 0)
+	if largeIcon != 0 {
+		appIcon = largeIcon
+		defer user32.NewProc("DestroyIcon").Call(largeIcon)
+	}
 	class := windowClass{Style: 3, Procedure: syscall.NewCallback(windowProc), Instance: instance, Icon: icon, Cursor: cursor, Background: backgroundBrush, Name: wide("GreatLibrarySetupWindow")}
 	if result, _, _ := user32.NewProc("RegisterClassW").Call(uintptr(unsafe.Pointer(&class))); result == 0 {
 		return

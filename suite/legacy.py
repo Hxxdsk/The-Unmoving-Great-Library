@@ -15,6 +15,8 @@ def load_original(key: str):
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    from .enhancements import enhance
+    enhance(module, key)
     return module
 
 
@@ -86,7 +88,7 @@ def decorate_header(root, key):
                 continue
         except tk.TclError:
             continue
-        with Image.open(ROOT / "assets" / "patchouli.png") as artwork:
+        with Image.open(ROOT / "assets" / ("logo-" + key + ".png")) as artwork:
             artwork.thumbnail((56, 56), Image.Resampling.LANCZOS)
             icon = ImageTk.PhotoImage(artwork)
         decoration = tk.Label(header, image=icon, bg=p.HEADER, borderwidth=0)
@@ -97,12 +99,16 @@ def decorate_header(root, key):
 
 def run_legacy(key: str):
     import tkinter as tk
+    from .branding import identify_component
+    identify_component(key)
     tool = get_tool(key)
     module = load_original(key)
     apply_palette(module, key)
     root = tk.Tk()
-    icon = tk.PhotoImage(file=str(ROOT / "assets" / "toolbox.png"))
+    icon = tk.PhotoImage(file=str(ROOT / "assets" / ("logo-" + key + ".png")))
     root.iconphoto(True, icon)
+    if sys.platform == "win32":
+        root.iconbitmap(default=str(ROOT / "assets" / ("logo-" + key + ".ico")))
     root._suite_icon = icon
     app = getattr(module, tool.app_class)(root)
     common_ttk_theme(root)

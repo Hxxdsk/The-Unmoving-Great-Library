@@ -52,16 +52,14 @@ class Hub(QMainWindow):
         row.setContentsMargins(25, 20, 25, 20)
         titles = QVBoxLayout()
         titles.addWidget(label("大图书馆 · 商品资料工具箱", "suiteTitle"))
-        titles.addWidget(label("帕秋莉的小书房 · 从资料准备到图片整理", "suiteSubtitle"))
+        titles.addWidget(label("选择工具 → 处理资料 → 输出", "suiteSubtitle"))
         row.addLayout(titles)
         row.addStretch()
-        row.addWidget(label(f"TOOLS  /  {len(TOOLS):02d}", "suiteSubtitle"))
         row.addWidget(mascot(78))
         outer.addWidget(header)
         lead = QHBoxLayout()
-        lead.addWidget(label("选择今天要处理的工作", "section"))
+        lead.addWidget(label("工具", "section"))
         lead.addStretch()
-        lead.addWidget(label("各工具在独立窗口运行，可同时打开。", "hint"))
         outer.addLayout(lead)
         grid = QGridLayout()
         grid.setSpacing(16)
@@ -69,17 +67,15 @@ class Hub(QMainWindow):
             frame, layout = card()
             frame.setMinimumHeight(202)
             heading = QHBoxLayout()
-            heading.addWidget(label(f"{index + 1:02d}", "number"))
+            heading.addWidget(mascot(58, tool.key))
             heading.addStretch()
             status = label("待检测", "hint")
             self.tool_status[tool.key] = status
             heading.addWidget(status)
             layout.addLayout(heading)
             layout.addWidget(label(tool.title, "toolTitle"))
-            layout.addWidget(label(tool.subtitle, "hint"))
-            description = label(tool.description, "subtitle")
-            description.setWordWrap(True)
-            layout.addWidget(description)
+            methods = {"color": "读取表格 → 配对颜色 → 输出图片", "matcher": "导入表格 → 关联 PID → 配色导出", "generator": "选择资料与主数据 → 生成 → 核对", "joiner": "加载图片 → 确认正反面 → 拼接"}
+            layout.addWidget(label(methods.get(tool.key, tool.subtitle), "hint"))
             layout.addStretch()
             button = QPushButton("打开工具  →")
             button.setObjectName("primary")
@@ -112,7 +108,7 @@ class Hub(QMainWindow):
         self.environment_status.setWordWrap(True)
         env.addWidget(self.environment_status)
         outer.addWidget(environment)
-        self.footer = label("关闭首页后，已经打开的工具仍可继续运行。", "hint")
+        self.footer = label("", "hint")
         outer.addWidget(self.footer)
 
     def check_environment(self):
@@ -147,8 +143,7 @@ class Hub(QMainWindow):
         if failures:
             self.environment_failed("；".join(item["name"] + "：" + item["detail"] for item in failures))
             return
-        detail = " / ".join(item["name"] + " ✓" for item in result["checks"])
-        self.environment_status.setText(f"Python {result['version']}  ·  {result['architecture']}\n{detail}")
+        self.environment_status.setText(f"Python {result['version']}  ·  环境就绪")
         for key, button in self.buttons.items():
             button.setEnabled(True)
             self.tool_status[key].setText("运行中" if key in self.processes else "环境就绪")
@@ -213,6 +208,8 @@ QLabel#toolTitle { color: #302341; font-size: 20px; font-weight: 600; }
 
 
 def main(validated_runtime: str | None = None):
+    from .branding import identify_component
+    identify_component("hub")
     app = QApplication(sys.argv)
     app.setOrganizationName("GreatLibrary")
     app.setApplicationName("ProductToolbox")

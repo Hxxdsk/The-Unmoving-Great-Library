@@ -10,6 +10,7 @@ from PIL import Image
 
 from color_tool.data import Style
 from color_tool.gemini import GeminiClient, GeminiError, image_part, parse_response, validate_matches
+from suite.cache import ResultCache
 
 
 def response(data):
@@ -108,15 +109,17 @@ def test_multimodal_pairing_ignores_filename_order_and_commits_atomically(tmp_pa
     style = Style("A", colors={"黑色": ["sku-black"], "月光蓝": ["sku-blue"]}, folder=tmp_path,
                   chart=tmp_path / "颜色.png", images=[tmp_path / "1.jpg", tmp_path / "2.jpg"])
     client = GeminiClient("test-key", "models/gemini-test")
-    replies = [{"colors": [{"label": "黑色", "description": "黑"}, {"label": "月光蓝", "description": "浅蓝"}]},
-               {"images": [row("1.jpg", "月光蓝"), row("2.jpg", "黑色")]}]
-    with patch.object(client, "generate", side_effect=replies) as generate:
-        client.analyze_style(style)
+    reply = {"colors": [{"label": "黑色", "description": "黑"}, {"label": "月光蓝", "description": "浅蓝"}],
+             "images": [row("1.jpg", "月光蓝"), row("2.jpg", "黑色")], "alternatives": []}
+    cache = ResultCache("test", tmp_path / "cache")
+    with patch.object(client, "generate", return_value=reply) as generate:
+        client.analyze_style(style, cache=cache)
+        assert generate.call_count == 1
     assert style.selections == {"黑色": "2.jpg", "月光蓝": "1.jpg"}
-    parts = generate.call_args_list[1].args[0]
+    parts = generate.call_args_list[0].args[0]
     assert sum("inlineData" in part for part in parts) == 3
     assert "sku-black" not in json.dumps(parts)
-    with patch.object(client, "generate", side_effect=[replies[0], {"images": []}]):
+    with patch.object(client, "generate", return_value={"colors": reply["colors"], "images": [], "alternatives": []}):
         with pytest.raises(GeminiError):
-            client.analyze_style(style)
+            client.analyze_style(style, force=True, cache=cache)
     assert style.selections == {"黑色": "2.jpg", "月光蓝": "1.jpg"}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6.QtCore import QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, QSize
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap, QColor
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QCheckBox,
 )
 
-from .data import Project, Style, export_project, list_workbooks, make_plan, read_project, color_candidates
+from .data import Project, Style, export_project, list_workbooks, make_plan, read_project, color_candidates, color_key
 from .credentials import KeyStore, CredentialError
 from suite.widgets import ClickOnlyComboBox, FollowLog, readable_selection
 from .gemini import GeminiClient, GeminiError
@@ -102,7 +103,7 @@ class Window(QMainWindow):
     def __init__(self, settings: Settings | None = None, key_store: KeyStore | None = None):
         super().__init__()
         self.setWindowTitle("商品图片 · 颜色配对助手")
-        self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "assets" / "toolbox.ico")))
+        self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "assets" / "logo-color.ico")))
         self.resize(1310, 920)
         self.setMinimumSize(1060, 740)
         self.settings = settings or Settings(Path(QStandardPaths.writableLocation(
@@ -123,7 +124,7 @@ class Window(QMainWindow):
             self.api_key.blockSignals(True)
             self.api_key.setText(self._saved_key)
             self.api_key.blockSignals(False)
-            self._models_verified = bool(self._saved_key and self.settings.get("model") == self.key_store.validated_model)
+            self._models_verified = bool(self._saved_key and self.settings.get("model") in self.key_store.validated_models)
             if self._saved_key:
                 self.key_status.setText("Key 已安全恢复")
         except (CredentialError, OSError):
@@ -145,14 +146,13 @@ class Window(QMainWindow):
         title_row.setContentsMargins(16, 8, 16, 8)
         titles = QVBoxLayout()
         titles.addWidget(label("商品图片 · 颜色配对助手", "title"))
-        titles.addWidget(label("选择资料目录  →  AI 比较服装颜色  →  确认配对  →  按商品编码输出", "subtitle"))
+        titles.addWidget(label("读取表格  →  AI 或手动配对  →  核对并输出", "subtitle"))
         title_row.addLayout(titles)
         title_row.addStretch()
         mascot = label("")
-        mascot.setPixmap(thumbnail(Path(__file__).resolve().parent.parent / "assets" / "patchouli.png", 52, 52))
+        mascot.setPixmap(thumbnail(Path(__file__).resolve().parent.parent / "assets" / "logo-color.png", 52, 52))
         mascot.setToolTip("帕秋莉的魔法书 · 图片与资料整理")
         title_row.addWidget(mascot)
-        title_row.addWidget(label("原图保留  /  多款号批量处理", "hint"))
         self.setup_toggle = QPushButton("收起设置 ▴")
         self.setup_toggle.setCheckable(True)
         self.setup_toggle.toggled.connect(self.toggle_setup)
@@ -204,7 +204,7 @@ class Window(QMainWindow):
         self.model_combo.setMinimumContentsLength(20)
         setup.addLayout(grid)
         privacy_row = QHBoxLayout()
-        privacy_row.addWidget(label("图片由 Gemini 识别；不上传表格与商品编码。", "hint"))
+        privacy_row.addWidget(label("无 Key 也可手动配对后输出。", "hint"))
         privacy_row.addStretch()
         self.key_status = label("Key 将由当前 Windows 账户加密保存", "hint")
         privacy_row.addWidget(self.key_status)
@@ -249,7 +249,7 @@ class Window(QMainWindow):
         top = QHBoxLayout()
         description = QVBoxLayout()
         self.style_heading = label("颜色配对工作台", "section")
-        self.style_hint = label("名称不同或 AI 不确定时，直接在“使用的原图”中选择并连接。", "hint")
+        self.style_hint = label("点击列表选择图片；双击行放大。", "hint")
         self.style_hint.setWordWrap(True)
         description.addWidget(self.style_heading)
         description.addWidget(self.style_hint)
@@ -310,6 +310,9 @@ class Window(QMainWindow):
         for widget in (self.analyze_button, self.retry_button, self.cancel_button):
             bottom.addWidget(widget)
         bottom.addStretch()
+        self.partial_output = QCheckBox("仅输出已配对")
+        self.partial_output.toggled.connect(self.update_totals)
+        bottom.addWidget(self.partial_output)
         bottom.addWidget(self.open_button)
         bottom.addWidget(self.export_button)
         outer.addLayout(bottom)
@@ -340,7 +343,7 @@ class Window(QMainWindow):
         self.log.textChanged.connect(self.update_latest_log)
         outer.addWidget(self.log)
         self.busy_widgets = [setup_card, splitter, self.analyze_button, self.retry_button,
-                             self.export_button, self.open_button]
+                             self.export_button, self.open_button, self.partial_output]
 
     def save_setting(self, key, value):
         try:
@@ -502,7 +505,7 @@ class Window(QMainWindow):
             self.error("请先输入 API Key、检测模型并选择一个模型。")
             return
         styles = [self.current_style()] if current_only else self.project.styles
-        styles = [style for style in styles if style and not style.issues]
+        styles = [style for style in styles if style and not style.issues and not style.ai_issues and style.chart]
         if not styles:
             self.error("没有可识别的款号，请检查日志中的文件夹或颜色图问题。")
             return
@@ -510,17 +513,20 @@ class Window(QMainWindow):
         def work(cancel, log, progress):
             client = GeminiClient(key, model, cancel)
             succeeded = 0
-            for index, style in enumerate(styles, 1):
-                if cancel.is_set():
-                    break
+            def analyze_one(style):
                 try:
-                    client.analyze_style(style, log)
-                    succeeded += 1
-                    log(f"{style.code}：识别完成；已配对 {len(style.selections)}/{len(style.colors)} 个表格颜色。")
+                    client.analyze_style(style, log, force=current_only)
+                    log(f"{style.code}：已配对 {len(style.selections)}/{len(style.colors)}。")
+                    return 1
                 except Exception as exc:
                     style.analysis_error = str(exc)
                     log(f"{style.code}：{exc}")
-                progress(index, len(styles))
+                    return 0
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(analyze_one, style) for style in styles]
+                for index, future in enumerate(as_completed(futures), 1):
+                    succeeded += future.result()
+                    progress(index, len(styles))
             return succeeded, len(styles), cancel.is_set()
 
         def done(result):
@@ -557,9 +563,9 @@ class Window(QMainWindow):
             self.style_summary.setText("读取表格后显示款号与处理状态。")
             return
         self.style_heading.setText(f"{style.code}  ·  {len(style.colors)} 个颜色")
-        self.style_hint.setText("；".join(style.issues) or ("AI 识别失败，可手动选择原图；详情见日志。" if style.analysis_error
-                                                         else "核对预览；名称不同或未匹配的颜色由你选择原图连接。"))
-        self.style_summary.setText(f"{len(style.images)} 张商品原图\n{style.sku_count} 张输出图片\n所有尺码使用该颜色选定的同一张原图。")
+        self.style_hint.setText("；".join(style.issues + style.ai_issues) or ("AI 失败，可手动配对。" if style.analysis_error
+                                                         else "核对建议；名称不一致的行请重点检查。"))
+        self.style_summary.setText(f"{len(style.images)} 张原图 · {style.sku_count} 张输出")
         self.table.setRowCount(len(style.colors))
         for row, (color, skus) in enumerate(style.colors.items()):
             self.table.setRowHeight(row, 46)
@@ -603,7 +609,19 @@ class Window(QMainWindow):
         gallery_layout.addStretch()
 
     def select_image(self, style: Style, color: str, row: int, filename: str):
+        other = next((name for name, selected in style.selections.items() if selected == filename and name != color), None) if filename else None
+        if other:
+            QMessageBox.warning(self, "图片已使用", f"这张图片已配给“{other}”，请先解除该配对。")
+            combo = self.table.cellWidget(row, 3)
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(combo.findData(style.selections.get(color, "")), 0))
+            combo.blockSignals(False)
+            return
         style.manual_colors.add(color)
+        style.suggested_colors.discard(color)
+        style.review_notes.pop(color, None)
+        style.name_mismatches.pop(color, None)
+        style.pair_confidences.pop(color, None)
         if filename:
             style.selections[color] = filename
         else:
@@ -620,12 +638,15 @@ class Window(QMainWindow):
         visible_match = match or pending
         label_text = visible_match.color_label if visible_match else "—"
         self.table.setItem(row, 2, QTableWidgetItem(label_text or "未确定"))
-        self.table.setItem(row, 5, QTableWidgetItem(f"{visible_match.confidence:.0%}" if visible_match else "—"))
+        confidence = style.pair_confidences.get(color, visible_match.confidence if visible_match else 0)
+        self.table.setItem(row, 5, QTableWidgetItem(f"{confidence:.0%}" if visible_match else "—"))
         status = "人工连接" if chosen and color in style.manual_colors else "自动配对 · 请核对" if chosen else "待人工连接"
+        if chosen and color in style.suggested_colors:
+            status = "名称不一致 · 请核对" if color in style.name_mismatches else "AI建议 · 请核对"
         if pending:
             status = "已识别 · 待复核"
         item = QTableWidgetItem(status)
-        item.setForeground(QColor("#168b78") if chosen else QColor("#9b641c"))
+        item.setForeground(QColor("#9b641c") if color in style.suggested_colors or not chosen else QColor("#168b78"))
         detail = style.review_notes.get(color, "") or (visible_match.reason if visible_match else "可直接选择任意原图。")
         if pending:
             detail = f"候选 {pending.filename}，自评 {pending.confidence:.0%}，复核标记 {pending.needs_review}。\n" + detail
@@ -646,15 +667,19 @@ class Window(QMainWindow):
             self.stats[1].setText(str(self.project.sku_count))
             self.stats[2].setText(f"{paired} / {total}")
             ready = paired == total and all(not s.issues for s in self.project.styles)
+            if self.partial_output.isChecked():
+                ready = any(s.selections and not s.issues for s in self.project.styles)
         else:
             for widget in self.stats:
                 widget.setText("—")
             ready = False
         if self.job:
             return
-        ai_ready = bool(self.project and self.api_key.text().strip() and self.model_combo.currentData() and self._models_verified)
+        ai_ready = bool(self.project and any(s.chart and not s.issues and not s.ai_issues for s in self.project.styles)
+                        and self.api_key.text().strip() and self.model_combo.currentData() and self._models_verified)
         self.analyze_button.setEnabled(ai_ready)
-        self.retry_button.setEnabled(ai_ready and self.current_style() is not None)
+        current = self.current_style()
+        self.retry_button.setEnabled(bool(ai_ready and current and current.chart and not current.ai_issues and not current.issues))
         self.export_button.setEnabled(ready)
         self.open_button.setEnabled(self.last_output is not None)
 
@@ -662,13 +687,15 @@ class Window(QMainWindow):
         if not self.project:
             return
         try:
-            plan = make_plan(self.project)
+            plan = make_plan(self.project, partial=self.partial_output.isChecked())
         except Exception as exc:
             self.error(str(exc))
             return
         manual = sum(len(s.manual_colors & s.selections.keys()) for s in self.project.styles)
-        prompt = (f"将按当前配对复制 {len(plan)} 张图片，其中 {manual} 个颜色由你人工连接。\n\n"
-                  "原图保持不变，结果写入所选目录下“_商品编码图片”的新批次文件夹。\n确定按当前配对输出？")
+        suggested = sum(len(s.suggested_colors) for s in self.project.styles)
+        prompt = f"按当前配对输出 {len(plan)} 张图片？\n人工配对 {manual} 色，AI 待核对建议 {suggested} 色。\n原图保留。"
+        if self.partial_output.isChecked():
+            prompt += f"\n本次跳过未配对或文件待检查的 {self.project.sku_count-len(plan)} 张。"
         if QMessageBox.question(self, "确认输出", prompt) != QMessageBox.StandardButton.Yes:
             return
         project = self.project
@@ -766,6 +793,8 @@ class Window(QMainWindow):
 
 
 def main():
+    from suite.branding import identify_component
+    identify_component("color")
     app = QApplication(sys.argv)
     app.setOrganizationName("GreatLibrary")
     app.setApplicationName("ColorImageAssistant")

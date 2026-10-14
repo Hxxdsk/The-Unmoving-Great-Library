@@ -105,7 +105,8 @@ def test_missing_and_duplicate_chart(tmp_path):
     assert read_project(tmp_path, path).styles[0].issues
     folder = make_folder(tmp_path, "A")
     Image.new("RGB", (10, 10)).save(folder / "颜色.jpg")
-    assert "多张" in read_project(tmp_path, path).styles[0].issues[0]
+    assert "多张" in read_project(tmp_path, path).styles[0].ai_issues[0]
+    assert not read_project(tmp_path, path).styles[0].issues
 
 
 @pytest.mark.parametrize("name", ["../escape", "a/b", "a\\b", "NUL", "CON.jpg", "x:", "x.", "", "LPT1"])
