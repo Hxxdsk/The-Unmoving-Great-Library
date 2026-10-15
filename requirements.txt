@@ -5,3 +5,4 @@ pandas
 xlrd
 
 playwright
+websockets>=13

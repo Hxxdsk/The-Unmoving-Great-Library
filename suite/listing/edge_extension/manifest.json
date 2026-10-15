@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "大图书馆 · 抖店连接",
+  "version": "1.0.0",
+  "description": "连接本机工具箱，仅操作工具新建的抖店标签页，使用当前 Edge 登录状态。",
+  "permissions": ["debugger"],
+  "host_permissions": ["https://fxg.jinritemai.com/*", "http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{
+    "matches": ["http://127.0.0.1/*"],
+    "js": ["connect.js"],
+    "run_at": "document_idle"
+  }],
+  "icons": {"128": "icon.png"},
+  "action": {"default_title": "大图书馆 · 在工具箱点击连接 Edge"}
+}

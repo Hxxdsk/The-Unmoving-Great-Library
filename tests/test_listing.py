@@ -296,113 +296,197 @@ def test_listing_interface_has_expected_defaults(tmp_path):
     assert window.price.value() == 399 and window.inventory.value() == 1000
     assert window.table.rowCount() == 1 and window.selected()[0].sku == product.sku
     assert window.start.text() == "开始保存草稿"
+    assert window.login.text() == "连接 Edge"
+    assert not hasattr(window, "user_data") and not hasattr(window, "advanced")
     window.close()
     window.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
 
 
-def test_visible_edge_reconnect_keeps_profile_window_and_other_tabs(tmp_path):
-    """Exercise native launch -> worker disconnect -> another worker reconnect."""
+def test_edge_bridge_rejects_unpaired_and_foreign_origin():
+    from urllib.request import build_opener, ProxyHandler
+    from urllib.error import HTTPError
+    from websockets.sync.client import connect
+    from websockets.exceptions import InvalidStatus
+    from suite.listing.bridge import EdgeBridge
+
+    bridge = EdgeBridge()
+    try:
+        config = bridge.start()
+        local = build_opener(ProxyHandler({}))
+        with local.open(bridge.connect_url.split("#")[0]) as reply:
+            assert "加载解压缩的扩展" in reply.read().decode()
+        with pytest.raises(HTTPError) as failure:
+            local.open(f"http://127.0.0.1:{bridge.port}/cdp/wrong-token")
+        assert failure.value.code == 403
+        with pytest.raises(InvalidStatus):
+            connect(config.endpoint, origin="https://untrusted.example", proxy=None)
+        with connect(config.endpoint, proxy=None) as socket:
+            with pytest.raises(Exception, match="请先点击连接 Edge"):
+                socket.recv()
+    finally:
+        bridge.close()
+
+
+def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
+    """Real Chromium + unchanged extension JS; Chrome APIs use a Node stand-in.
+
+    This is not an installed-extension test: cloud policy blocks unpacked
+    extensions. No policy is changed, and all merchant requests are local fixtures.
+    """
     import os
-    from suite.listing.browser import EdgeSession, profile_endpoint
+    import subprocess
+    import time
+    from urllib.request import build_opener, ProxyHandler
+    from websockets.sync.client import connect
+    from suite.listing.bridge import EdgeBridge, EXTENSION_DIR
+    from suite.listing.browser import EdgeSession
 
     executable = shutil.which("chromium")
-    if os.name == "nt" or not executable or not os.environ.get("DISPLAY"):
-        pytest.skip("本检查需要 Linux Chromium 和可见 X11 显示服务")
-    profile = tmp_path / "existing-edge-data"
-    (profile / "Default").mkdir(parents=True)
-    wrapper = tmp_path / "browser"
-    wrapper.write_text(
-        '#!/bin/sh\nexec "'
-        + executable
-        + '" --no-sandbox --disable-background-networking "$@"\n'
+    node = (
+        shutil.which("node")
+        or "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node"
     )
-    wrapper.chmod(0o700)
-    config = BrowserConfig(str(profile), "Default", str(wrapper))
-    results, errors = [], []
-
-    def job(first):
-        try:
-            with EdgeSession(config, threading.Event()) as session:
-                cdp = session.browser.new_browser_cdp_session()
-                arguments = cdp.send("Browser.getBrowserCommandLine")["arguments"]
-                cdp.detach()
-                assert not any(
-                    "--headless" in a or "--incognito" in a for a in arguments
+    if (
+        os.name == "nt"
+        or not executable
+        or not Path(node).exists()
+        or not os.environ.get("DISPLAY")
+    ):
+        pytest.skip(
+            "连接协议夹具需要 Linux Chromium、Node 和 X11；不代表真实 Edge 扩展测试"
+        )
+    bridge = EdgeBridge()
+    config = bridge.start()
+    profile = tmp_path / "fixture-browser"
+    profile.mkdir()
+    browser = subprocess.Popen(
+        [
+            executable,
+            "--no-sandbox",
+            "--disable-background-networking",
+            "--no-first-run",
+            "--remote-debugging-port=0",
+            "--user-data-dir=" + str(profile),
+            "about:blank",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    host = None
+    try:
+        deadline = time.monotonic() + 15
+        while not (profile / "DevToolsActivePort").exists():
+            assert time.monotonic() < deadline, "本地浏览器没有启动"
+            time.sleep(0.1)
+        port, path = (profile / "DevToolsActivePort").read_text().splitlines()[:2]
+        real_endpoint = f"ws://127.0.0.1:{port}{path}"
+        with connect(real_endpoint, proxy=None) as socket:
+            socket.send(
+                json.dumps(
+                    {
+                        "id": 1,
+                        "method": "Storage.setCookies",
+                        "params": {
+                            "cookies": [
+                                {
+                                    "name": "fixture-login",
+                                    "value": "already-logged-in",
+                                    "domain": "fxg.jinritemai.com",
+                                    "path": "/",
+                                    "secure": True,
+                                }
+                            ]
+                        },
+                    }
                 )
-                assert "--profile-directory=Default" in arguments
-                page = session.page
-                page.route(
+            )
+            assert json.loads(socket.recv()).get("result") == {}
+        host = subprocess.Popen(
+            [
+                node,
+                str(FIXTURE.with_name("listing_extension_host.cjs")),
+                str(EXTENSION_DIR / "background.js"),
+                real_endpoint,
+                str(bridge.port),
+                bridge.token,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        assert bridge.connected.wait(10), "扩展协议夹具未连接"
+
+        class FixtureSession(EdgeSession):
+            def __enter__(self):
+                super().__enter__()
+                self.page.route(
                     "**/*",
                     lambda route: route.fulfill(
                         content_type="text/html; charset=utf-8",
-                        body="<button>新建商品</button>",
+                        body=FIXTURE.read_text(),
                     ),
                 )
-                if first:
-                    session.context.add_cookies(
-                        [
-                            {
-                                "name": "fixture-login",
-                                "value": "existing-login",
-                                "domain": "fxg.jinritemai.com",
-                                "path": "/",
-                                "secure": True,
-                            }
-                        ]
+                return self
+
+        product = make_product(tmp_path / "products")
+        result = BatchRunner(
+            tmp_path / "products",
+            [product],
+            config,
+            Client(),
+            threading.Event(),
+            session_factory=FixtureSession,
+        ).run()
+        assert result == [(product.sku, "已保存")]
+        assert Journal(tmp_path / "products").get(product)["status"] == "saved"
+        # Reconnect from another worker, retaining existing profile login and tabs.
+        errors = []
+
+        def reconnect():
+            try:
+                with FixtureSession(config, threading.Event()) as session:
+                    assert len(session.context.pages) == 1
+                    session.check_login()
+                    assert "fixture-login=already-logged-in" in session.page.evaluate(
+                        "document.cookie"
                     )
-                    other = session.context.new_page()
-                    other.goto("about:blank#ordinary-user-tab")
-                    assert "已复用" in session.open_login()
-                else:
-                    assert any(
-                        c["name"] == "fixture-login" for c in session.context.cookies()
-                    )
-                    assert any(
-                        p.url.endswith("#ordinary-user-tab")
-                        for p in session.context.pages
-                    )
-                    assert session.page.url.startswith("https://fxg.jinritemai.com/")
-                    assert "已复用" in session.check_login()
-                assert session.new_work_page() is page
-                target = session.context.new_cdp_session(page)
-                target_id = target.send("Target.getTargetInfo")["targetInfo"][
-                    "targetId"
-                ]
-                target.detach()
-                results.append(
-                    (session.endpoint, target_id, len(session.context.pages))
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=reconnect)
+        worker.start()
+        worker.join(30)
+        assert not worker.is_alive()
+        if errors:
+            raise errors[0]
+        with connect(config.endpoint, proxy=None) as socket:
+            socket.send(
+                json.dumps(
+                    {
+                        "id": 1,
+                        "method": "Target.closeTarget",
+                        "params": {"targetId": "not-a-work-tab"},
+                    }
                 )
-        except BaseException as exc:
-            errors.append(exc)
-
-    try:
-        for first in (True, False):
-            worker = threading.Thread(target=job, args=(first,))
-            worker.start()
-            worker.join(50)
-            assert not worker.is_alive(), "浏览器工作线程未按时返回"
-            if errors:
-                raise errors[0]
-            assert profile_endpoint(profile), "工作线程退出后浏览器应继续运行"
-        assert results[0] == results[1], "两个工作线程应复用同一浏览器、操作标签和资料"
+            )
+            while True:
+                reply = json.loads(socket.recv())
+                if reply.get("id") == 1:
+                    assert "禁止关闭用户原有标签页" in reply["error"]["message"]
+                    break
+        local = build_opener(ProxyHandler({}))
+        with local.open(f"http://127.0.0.1:{port}/json/list") as reply:
+            targets = json.load(reply)
+        assert any(t["url"] == "about:blank#ordinary-user-tab" for t in targets)
+        assert bridge.connected.is_set() and browser.poll() is None
     finally:
-        endpoint = profile_endpoint(profile)
-        if endpoint:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.connect_over_cdp(endpoint)
-                connection = browser.new_browser_cdp_session()
-                connection.send("Browser.close")
-
-
-def test_edge_rejects_invalid_profile_without_launching(tmp_path):
-    from suite.listing.browser import EdgeSession
-
-    session = EdgeSession(BrowserConfig(str(tmp_path), "../Default"), threading.Event())
-    with patch("suite.listing.browser.subprocess.Popen") as launch:
-        with pytest.raises(ListingError, match="配置名称无效"):
-            session._open_profile()
-        launch.assert_not_called()
+        bridge.close()
+        if host:
+            host.terminate()
+            host.wait(5)
+            host.stderr.close()
+        if browser.poll() is None:
+            os.killpg(browser.pid, 15)
+        browser.wait(10)

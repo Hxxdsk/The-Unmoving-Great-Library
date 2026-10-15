@@ -4,7 +4,7 @@ import json
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QStandardPaths
+from PySide6.QtCore import Qt, QThread, Signal, QStandardPaths, QTimer
 from PySide6.QtGui import QIcon, QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QLabel,
     QPushButton,
-    QComboBox,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -27,16 +26,16 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QSpinBox,
     QMessageBox,
-    QGroupBox,
 )
 
 from color_tool.ui import STYLESHEET, Job, card, label
 from suite.branding import mascot, identify_component
 from suite.registry import ROOT
 from suite.shared_ai import shared_client
-from suite.widgets import FollowLog, ClickOnlyComboBox
+from suite.widgets import FollowLog
 from .models import scan_products, Journal
-from .browser import BrowserConfig, EdgeSession, edge_data_path, edge_profiles
+from .browser import EdgeSession
+from .bridge import EdgeBridge, EXTENSION_DIR
 from .runner import BatchRunner
 
 
@@ -70,6 +69,7 @@ class ListingWindow(QMainWindow):
         self.products = []
         self.worker = None
         self.check_job = None
+        self.bridge = EdgeBridge()
         self.config_path = (
             Path(
                 QStandardPaths.writableLocation(
@@ -98,9 +98,7 @@ class ListingWindow(QMainWindow):
         heading = QHBoxLayout()
         title = QVBoxLayout()
         title.addWidget(label("抖店批量上架", "title"))
-        title.addWidget(
-            label("选择目录 → 打开 Edge 操作窗口 → 逐货号填写 → 保存草稿", "hint")
-        )
+        title.addWidget(label("选择目录 → 连接 Edge → 逐货号填写 → 保存草稿", "hint"))
         heading.addLayout(title)
         heading.addStretch()
         heading.addWidget(mascot(70, "listing"))
@@ -118,20 +116,17 @@ class ListingWindow(QMainWindow):
         grid.addWidget(self.directory, 0, 1, 1, 3)
         grid.addWidget(self.choose, 0, 4)
         grid.addWidget(self.scan, 0, 5)
-        self.user_data = QLineEdit(
-            self.preferences.get("user_data", str(edge_data_path()))
-        )
-        self.profile = ClickOnlyComboBox()
-        self.profile.setMinimumWidth(160)
-        self.profile_choose = QPushButton("资料目录")
-        self.profile_choose.clicked.connect(self.choose_profile_path)
-        self.login = QPushButton("打开 Edge / 检查登录")
+        self.login = QPushButton("连接 Edge")
         self.login.clicked.connect(self.check_login)
-        grid.addWidget(QLabel("Edge 资料"), 1, 0)
-        grid.addWidget(self.user_data, 1, 1, 1, 2)
-        grid.addWidget(self.profile, 1, 3)
-        grid.addWidget(self.profile_choose, 1, 4)
-        grid.addWidget(self.login, 1, 5)
+        self.install_extension = QPushButton("首次安装扩展")
+        self.install_extension.clicked.connect(self.open_extension)
+        self.connection_status = label("尚未连接 Edge", "hint")
+        browser_row = QHBoxLayout()
+        browser_row.addWidget(self.login)
+        browser_row.addWidget(self.install_extension)
+        browser_row.addWidget(self.connection_status)
+        browser_row.addStretch()
+        grid.addLayout(browser_row, 1, 0, 1, 6)
         grid.setColumnStretch(1, 3)
         grid.setColumnStretch(3, 1)
         content.addLayout(grid)
@@ -153,24 +148,9 @@ class ListingWindow(QMainWindow):
         options.addWidget(self.inventory)
         options.addWidget(label("48 小时发货 · 只保存草稿", "hint"))
         content.addLayout(options)
-        self.advanced = QGroupBox("可选：连接已启用调试的 Edge / 指定浏览器程序")
-        self.advanced.setCheckable(True)
-        self.advanced.setChecked(
-            bool(self.preferences.get("endpoint") or self.preferences.get("executable"))
-        )
-        advanced = QHBoxLayout(self.advanced)
-        self.endpoint = QLineEdit(self.preferences.get("endpoint", ""))
-        self.endpoint.setPlaceholderText(
-            "本机调试地址，如 http://127.0.0.1:9222（可留空）"
-        )
-        self.executable = QLineEdit(self.preferences.get("executable", ""))
-        self.executable.setPlaceholderText("msedge.exe 路径（默认自动查找）")
-        advanced.addWidget(self.endpoint)
-        advanced.addWidget(self.executable)
-        content.addWidget(self.advanced)
         content.addWidget(
             label(
-                "使用可见的 Edge 操作窗口，保留登录与窗口供下次复用；操作期间请勿手动切换页面。API / 模型在工具箱主页配置。",
+                "首次加载连接扩展 → 连接 Edge → 确认抖店已登录 → 开始任务。其他标签页可正常使用，请勿操作工具的工作页。",
                 "hint",
             )
         )
@@ -219,31 +199,30 @@ class ListingWindow(QMainWindow):
         actions.addWidget(self.stop)
         actions.addWidget(self.start)
         outer.addLayout(actions)
-        self.user_data.editingFinished.connect(self.refresh_profiles)
-        self.refresh_profiles()
         self.start.setEnabled(False)
-
-    def refresh_profiles(self):
-        profiles, preferred = edge_profiles(self.user_data.text())
-        selected = self.profile.currentData() or self.preferences.get(
-            "profile", preferred
+        self.connection_timer = QTimer(self)
+        self.connection_timer.timeout.connect(
+            lambda: self.connection_status.setText(
+                "Edge 已连接" if self.bridge.connected.is_set() else "尚未连接 Edge"
+            )
         )
-        self.profile.clear()
-        for key, name in profiles:
-            self.profile.addItem(f"{name} · {key}", key)
-        self.profile.setCurrentIndex(max(0, self.profile.findData(selected)))
+        self.connection_timer.start(1000)
 
     def save_preferences(self):
-        data = {
-            "directory": self.directory.text(),
-            "user_data": self.user_data.text(),
-            "profile": self.profile.currentData() or "Default",
-            "endpoint": self.endpoint.text(),
-            "executable": self.executable.text(),
-        }
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(
+                {"directory": self.directory.text()}, ensure_ascii=False, indent=2
+            ),
+            encoding="utf-8",
+        )
+
+    def open_extension(self):
+        QApplication.clipboard().setText(str(EXTENSION_DIR.resolve()))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(EXTENSION_DIR.resolve())))
+        self.log.appendPlainText(
+            "首次安装：在 Edge 打开 edge://extensions → 开启开发人员模式 → 加载解压缩的扩展。"
+            "扩展目录已复制，粘贴到目录选择框即可；完成后点“连接 Edge”。"
         )
 
     def choose_root(self):
@@ -254,21 +233,12 @@ class ListingWindow(QMainWindow):
             self.directory.setText(path)
             self.scan_root()
 
-    def choose_profile_path(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "选择 Edge User Data 目录", self.user_data.text()
-        )
-        if path:
-            self.user_data.setText(path)
-            self.refresh_profiles()
-
     def browser_config(self):
-        return BrowserConfig(
-            self.user_data.text(),
-            self.profile.currentData() or "Default",
-            self.executable.text().strip() if self.advanced.isChecked() else "",
-            self.endpoint.text().strip() if self.advanced.isChecked() else "",
-        )
+        if not self.bridge.connected.is_set():
+            raise RuntimeError(
+                "请先点击“连接 Edge”；首次使用只需加载一次连接扩展，无需关闭 Edge。"
+            )
+        return self.bridge.start()
 
     def scan_root(self):
         try:
@@ -315,18 +285,15 @@ class ListingWindow(QMainWindow):
             self.scan,
             self.start,
             self.login,
-            self.profile_choose,
             self.directory,
-            self.user_data,
-            self.profile,
             self.reset,
             self.price,
             self.inventory,
-            self.advanced,
             self.ai,
         ):
             widget.setEnabled(not value)
-        self.stop.setEnabled(value and self.worker is not None)
+        self.install_extension.setEnabled(self.worker is None)
+        self.stop.setEnabled(value)
         for row in range(self.table.rowCount()):
             self.table.cellWidget(row, 0).setEnabled(not value)
 
@@ -380,6 +347,8 @@ class ListingWindow(QMainWindow):
         self.log.appendPlainText(f"[{sku}] {status} · {message}")
 
     def stop_work(self):
+        if self.check_job:
+            self.check_job.cancel_event.set()
         if self.worker:
             self.worker.cancel.set()
             self.log.appendPlainText("正在停止，已确认保存的草稿保留…")
@@ -393,11 +362,29 @@ class ListingWindow(QMainWindow):
     def check_login(self):
         if self.check_job:
             return
-        config = self.browser_config()
-        self.save_preferences()
-        self.log.appendPlainText("正在打开或连接 Edge 操作窗口，复用所选资料…")
+        try:
+            config = self.bridge.start()
+            if not self.bridge.connected.is_set():
+                self.bridge.open_edge()
+            self.save_preferences()
+        except Exception as exc:
+            self.error(str(exc))
+            return
+        self.log.appendPlainText(
+            "已在当前 Edge 打开连接页；首次使用请加载扩展，已安装时自动连接。"
+        )
 
         def run(cancel, *_):
+            import time
+
+            deadline = time.monotonic() + 30
+            while not self.bridge.connected.is_set():
+                if cancel.wait(0.2):
+                    return "已取消连接，Edge 窗口保留。"
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "尚未收到 Edge 扩展连接。请按连接页说明首次加载扩展，再点“连接 Edge”。"
+                    )
             with EdgeSession(config, cancel) as session:
                 return session.open_login()
 
@@ -445,6 +432,7 @@ class ListingWindow(QMainWindow):
             self.log.appendPlainText("正在结束当前步骤，请稍后关闭。")
             event.ignore()
         else:
+            self.bridge.close()
             event.accept()
 
 
