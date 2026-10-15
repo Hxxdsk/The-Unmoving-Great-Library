@@ -236,6 +236,20 @@ def apply(module):
 
         original_init(self, root)
         self.task = TkTask(root)
+        self._pending_sources = None
+        self._desired_sources = []
+        self.auto_sort_var.set(False)
+
+        def remove_auto_sort(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, ttk.Checkbutton) and child.cget("text") == "加载后自动识别排序":
+                    child.destroy()
+                else:
+                    if isinstance(child, tk.Button) and child.cget("text") == "重新智能排序":
+                        child.configure(text="智能排序")
+                    remove_auto_sort(child)
+
+        remove_auto_sort(root)
         header = root.winfo_children()[0]
         self.ai_panel = GeminiPanel(root, "AI 正反面识别", component="joiner")
         self.ai_panel.pack(fill="x", after=header, padx=20, pady=(8, 0))
@@ -249,7 +263,7 @@ def apply(module):
             child for child in header.winfo_children() if isinstance(child, tk.Label)
         ]
         if len(labels) > 1:
-            labels[1].configure(text="加载图片 → 确认正反面 → 拖动调整 → 拼接")
+            labels[1].configure(text="加载图片 → 点击智能排序 → 微调正反面与顺序 → 拼接")
         self._close_requested = False
 
         def close():
@@ -271,6 +285,9 @@ def apply(module):
         root.protocol("WM_DELETE_WINDOW", close)
 
     def sort(self, show_message=True):
+        if self.task.busy or self._pending_sources is not None:
+            self.status_text.set("加载结束后可点击智能排序")
+            return
         # 原分组算法保留；它在进入分组前重置 side，assign_sides 从可信来源恢复。
         for item in self.image_list:
             if item.get("manual_side"):
@@ -285,12 +302,22 @@ def apply(module):
         item["side_source"] = "人工"
 
     def start_load(self, file_paths):
+        file_paths = list(file_paths)
+        self._desired_sources = file_paths
         if self.task.busy:
+            self._pending_sources = file_paths
+            self.status_text.set("新文件夹已排队，当前任务结束后继续加载")
             return
+        self._pending_sources = None
         if not file_paths:
             self.image_list = []
             self.refresh_canvas()
             self.update_summary()
+            return
+        loaded = {source_key(item["path"]) for item in self.image_list}
+        file_paths = [source for source in file_paths if source_key(source) not in loaded]
+        if not file_paths:
+            self._finish_loading([])
             return
         self._loading = True
         self.set_progress(1)
@@ -355,8 +382,49 @@ def apply(module):
         def finished():
             self._loading = False
             self.set_progress(0)
+            self.root.after(0, self._drain_load_queue)
 
         self.task.start(work, done, failed, finished, self.status_text.set)
+
+    def source_key(source):
+        import os
+        path = source[0] if isinstance(source, (tuple, list)) else source
+        return os.path.normcase(str(Path(path).resolve()))
+
+    def finish_loading(self, prepared):
+        from PIL import ImageTk
+        desired = {source_key(source): source for source in self._desired_sources}
+        items = [item for item in self.image_list if source_key(item["path"]) in desired]
+        seen = {source_key(item["path"]) for item in items}
+        for item in prepared:
+            key = source_key(item["path"])
+            if key not in desired or key in seen:
+                continue
+            item["photo"] = ImageTk.PhotoImage(item.pop("pil_thumb"), master=self.root)
+            items.append(item)
+            seen.add(key)
+        for index, item in enumerate(items):
+            source = desired[source_key(item["path"])]
+            item["source_folder_index"] = int(source[1]) if isinstance(source, (tuple, list)) and len(source) > 1 else 0
+            item["source_index"] = index
+        self.image_list = items
+        self.refresh_canvas()
+        self.update_summary()
+        self.status_text.set(f"已加载 {len(items)} 张图片；点击智能排序或手动调整")
+
+    def drain_load_queue(self):
+        if self._close_requested or self._pending_sources is None:
+            return
+        sources, self._pending_sources = self._pending_sources, None
+        self._start_load(sources)
+
+    original_folders = cls._load_selected_folders
+
+    def load_folders(self):
+        if not self._collect_selected_folders():
+            self._start_load([])
+            return
+        original_folders(self)
 
     def recognize_current(self):
         if self.task.busy or not self.image_list:
@@ -378,11 +446,13 @@ def apply(module):
             if self._close_requested:
                 return
             self.image_list = values
-            self.auto_group_sort(show_message=False)
+            self.refresh_canvas()
+            self.update_summary()
             self.status_text.set("识别完成；待确认的图片请点击正反面徽标")
 
         def finished():
             self._loading = False
+            self.root.after(0, self._drain_load_queue)
 
         self.task.start(
             work, done, self.status_text.set, finished, self.status_text.set
@@ -428,6 +498,10 @@ def apply(module):
             )
 
     cls.__init__, cls.auto_group_sort, cls._toggle_side_badge = init, sort, toggle
+    cls._finish_loading = finish_loading
+    cls._drain_load_queue = drain_load_queue
+    cls._load_selected_folders = load_folders
+    cls._sort_using_existing_groups = lambda self: None
     cls._start_load, cls._recognize_current, cls._show_side_review = (
         start_load,
         recognize_current,
@@ -437,7 +511,7 @@ def apply(module):
         original = getattr(cls, name)
 
         def guard(self, operation=original):
-            if self._loading or self.task.busy:
+            if self._loading or self.task.busy or self._pending_sources is not None:
                 messagebox.showinfo("请稍候", "识别尚未结束，请稍后处理。")
                 return
             return operation(self)

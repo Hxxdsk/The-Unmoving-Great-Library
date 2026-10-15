@@ -41,6 +41,21 @@ def common_ttk_theme(root):
     style.configure("Treeview.Heading", background="#eef2fa", font=(p.FONT, 10, "bold"))
     style.configure("Modern.Horizontal.TProgressbar", troughcolor="#e6ebf4", background=p.PRIMARY,
                     lightcolor=p.PRIMARY, darkcolor=p.PRIMARY, thickness=6)
+    if "SuiteCheck.indicator" not in style.element_names():
+        import tkinter as tk
+        off = tk.PhotoImage(master=root, file=str(ROOT / "assets" / "checkbox-off.png"))
+        on = tk.PhotoImage(master=root, file=str(ROOT / "assets" / "checkbox-on.png"))
+        root._suite_check_images = (off, on)
+        style.element_create("SuiteCheck.indicator", "image", off, ("selected", on), sticky="")
+    def check_layout(layout):
+        for index, (name, options) in enumerate(layout):
+            if name.endswith(".indicator"):
+                layout[index] = ("SuiteCheck.indicator", options)
+            if "children" in options:
+                check_layout(options["children"])
+        return layout
+    style.layout("TCheckbutton", check_layout(style.layout("TCheckbutton")))
+    style.layout("Modern.TCheckbutton", style.layout("TCheckbutton"))
 
 
 def apply_palette(module, key):
