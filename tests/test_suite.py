@@ -137,5 +137,6 @@ def test_runtime_probe_exercises_current_interpreter():
     import json
     report = json.loads(result.stdout)
     assert result.returncode == 0, report
-    assert report["ready"] and len(report["checks"]) == 8
+    dependencies = {dependency.module for tool in TOOLS for dependency in tool.dependencies}
+    assert report["ready"] and len(report["checks"]) == 8 + len(dependencies)
     assert report["version"].split(".")[:2] == list(map(str, sys.version_info[:2]))

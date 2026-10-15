@@ -91,7 +91,7 @@ class Hub(QMainWindow):
             heading.addWidget(status)
             layout.addLayout(heading)
             layout.addWidget(label(tool.title, "toolTitle"))
-            methods = {"color": "读取表格 → 配对颜色 → 输出图片", "matcher": "导入表格 → 关联 PID → 配色导出", "generator": "选择资料与主数据 → 生成 → 核对", "joiner": "加载图片 → 确认正反面 → 拼接"}
+            methods = {"color": "读取表格 → 配对颜色 → 输出图片", "matcher": "导入表格 → 关联 PID → 配色导出", "generator": "选择资料与主数据 → 生成 → 核对", "joiner": "加载图片 → 确认正反面 → 拼接", "listing": "选择目录 → 自动填写 → 保存草稿"}
             layout.addWidget(label(methods.get(tool.key, tool.subtitle), "hint"))
             layout.addStretch()
             button = QPushButton("打开工具  →")

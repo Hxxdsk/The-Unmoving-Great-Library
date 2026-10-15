@@ -61,9 +61,9 @@ QScrollArea { background: transparent; border: 0; }
 
 _CHECK_ASSETS = (Path(__file__).resolve().parent.parent / "assets").as_posix()
 STYLESHEET += f'''
-QCheckBox::indicator {{ width: 18px; height: 18px; border: none; }}
-QCheckBox::indicator:unchecked {{ image: url("{_CHECK_ASSETS}/checkbox-off.png"); }}
-QCheckBox::indicator:checked {{ image: url("{_CHECK_ASSETS}/checkbox-on.png"); }}
+QCheckBox::indicator, QGroupBox::indicator {{ width: 18px; height: 18px; border: none; }}
+QCheckBox::indicator:unchecked, QGroupBox::indicator:unchecked {{ image: url("{_CHECK_ASSETS}/checkbox-off.png"); }}
+QCheckBox::indicator:checked, QGroupBox::indicator:checked {{ image: url("{_CHECK_ASSETS}/checkbox-on.png"); }}
 '''
 
 
