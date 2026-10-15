@@ -9,10 +9,10 @@
   const photos = root => [...root.querySelectorAll('img')].filter(e => visible(e) && e.getBoundingClientRect().width >= 35 && !/data:image\/svg|\.svg(?:\?|$)/i.test(e.getAttribute('src') || ''));
   const remove = root => [...root.querySelectorAll('button,[role=button],[class*=delete],[class*=Delete],[class*=remove],[data-icon=delete],.anticon-close-circle')]
     .find(e => visible(e) && (/删除|移除|清空/.test(e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || '') || /delete|Delete|remove|close-circle/.test(e.className?.baseVal || e.className || '') || e.getAttribute('data-icon') === 'delete'));
-  if (op === 'section') {
+  if (op === 'section' || op === 'section_from') {
     const target = norm(label);
     const anchors=new Set(['主图','主图3:4','白底图','商品详情','水洗标/吊牌图','水洗标/吊牌图片','货号','颜色分类','尺码大小','价格与库存']);
-    const labels = [...document.querySelectorAll('label,span,div,p,h1,h2,h3,h4')].filter(e => visible(e) && (norm(e.innerText) === target || [...e.childNodes].some(n=>n.nodeType===3 && norm(n.textContent)===target)))
+    const labels = op === 'section_from' ? [document.querySelector(selector)].filter(Boolean) : [...document.querySelectorAll('label,span,div,p,h1,h2,h3,h4')].filter(e => visible(e) && (norm(e.innerText) === target || [...e.childNodes].some(n=>n.nodeType===3 && norm(n.textContent)===target)))
       .sort((a,b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
     for (const leaf of labels) {
       for (let e=leaf.parentElement, depth=0; e && e !== document.body && depth < 9; e=e.parentElement, depth++) {

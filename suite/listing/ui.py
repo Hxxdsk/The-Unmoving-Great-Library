@@ -131,8 +131,11 @@ class ListingWindow(QMainWindow):
         grid.setColumnStretch(3, 1)
         content.addLayout(grid)
         options = QHBoxLayout()
-        self.ai = QCheckBox("启用 AI 配色与尺码识别")
+        self.ai = QCheckBox("启用 AI 页面操作、配色与尺码识别")
         self.ai.setChecked(True)
+        self.ai.setToolTip(
+            "页面控件难以定位时，使用主页 API / 模型识别当前工作页截图并辅助悬停、点击。"
+        )
         options.addWidget(self.ai)
         options.addStretch()
         options.addWidget(QLabel("售价"))

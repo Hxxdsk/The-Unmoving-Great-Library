@@ -9,12 +9,13 @@ from PIL import Image, ImageOps
 from .models import ListingError, Cancelled, SaveUncertain
 from .browser import ENTRY_URL
 from .vision import normalize_size
+from .page_ai import PageAI, FORBIDDEN
 
 DOM = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
 
 
 class DouyinPage:
-    def __init__(self, session, cancel, log=lambda _: None):
+    def __init__(self, session, cancel, log=lambda _: None, client=None):
         self.session, self.page, self.cancel, self.log = (
             session,
             session.page,
@@ -22,6 +23,7 @@ class DouyinPage:
             log,
         )
         self.editor_url = ""
+        self.client = client
 
     def check(self):
         if self.cancel.is_set():
@@ -52,34 +54,82 @@ class DouyinPage:
                 self.check()
         raise ListingError(message)
 
+    def visible_control(self, text, root=None):
+        scope = root or self.page
+        queries = [
+            scope.get_by_role("button", name=text, exact=isinstance(text, str)),
+            scope.get_by_text(text, exact=isinstance(text, str)),
+        ]
+        if isinstance(text, str):
+            queries += [
+                scope.get_by_role("button", name=text, exact=False),
+                scope.get_by_text(re.compile(re.escape(text))),
+            ]
+        for query in queries:
+            visible = [
+                query.nth(i) for i in range(query.count()) if query.nth(i).is_visible()
+            ]
+            if len(visible) == 1:
+                return visible[0]
+        return None
+
+    def control(self, text, root=None):
+        self.check()
+        target = self.visible_control(text, root)
+        if target is None:
+            goal = text if isinstance(text, str) else text.pattern
+            target = PageAI(self.page, self.client, self.cancel, self.log).find(
+                goal, root
+            )
+        return target
+
     def click(self, text, root=None):
         self.check()
-        scope = root or self.page
-        target = scope.get_by_role("button", name=text, exact=isinstance(text, str))
-        if target.count() != 1:
-            target = scope.get_by_text(text, exact=isinstance(text, str))
-        visible = [
-            target.nth(i) for i in range(target.count()) if target.nth(i).is_visible()
-        ]
-        if len(visible) != 1:
-            raise ListingError(
-                f"页面控件「{text}」未找到或有多个，停止当前货号以免误操作。"
-            )
-        if re.search("发布商品|立即发布|确认发布", visible[0].inner_text()):
+        goal = text if isinstance(text, str) else text.pattern
+        if FORBIDDEN.search(re.sub(r"\s+", "", goal)):
             raise ListingError("工具只保存草稿，禁止点击发布。")
-        visible[0].click(timeout=12000)
+        target = self.control(text, root)
+        actual = target.evaluate(
+            "e=>{const p=e.closest('button,a,[role=button],[role=menuitem]')||e;return [p.innerText,p.getAttribute('aria-label'),p.title].filter(Boolean).join(' ')}"
+        )
+        if FORBIDDEN.search(re.sub(r"\s+", "", actual)):
+            raise ListingError("工具只保存草稿，禁止点击发布。")
+        target.click(timeout=12000)
 
     def tab(self, text):
-        target = self.page.get_by_text(text, exact=True)
-        candidates = [
-            target.nth(i) for i in range(target.count()) if target.nth(i).is_visible()
-        ]
-        if len(candidates) == 1:
-            candidates[0].click()
+        self.click(text)
+
+    def open_create_menu(self):
+        # The real Douyin control opens its single-product menu on hover.
+        if self.visible_control("单商品") is not None:
+            return
+        trigger = self.control("新建商品")
+        trigger.hover(timeout=10000)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            self.check()
+            if self.visible_control("单商品") is not None:
+                return
+            if self.cancel.wait(0.15):
+                self.check()
+        # Also support versions whose menu opens by clicking the trigger.
+        trigger.click(timeout=5000)
+        self.page.wait_for_timeout(250)
 
     def section(self, *names):
         for name in names:
             selector = self.dom("section", name)
+            if selector:
+                self.page.locator(selector).scroll_into_view_if_needed()
+                return selector
+        if self.client is not None:
+            target = PageAI(self.page, self.client, self.cancel, self.log).find(
+                "定位字段标题：" + "/".join(names) + "，不要选择其他字段或实际上传按钮"
+            )
+            leaf = target.evaluate(
+                "e=>{if(!e.dataset.glId)e.dataset.glId='gl'+crypto.randomUUID().replaceAll('-','');return '[data-gl-id=\"'+e.dataset.glId+'\"]'}"
+            )
+            selector = self.dom("section_from", names[0], leaf)
             if selector:
                 self.page.locator(selector).scroll_into_view_if_needed()
                 return selector
@@ -119,9 +169,13 @@ class DouyinPage:
             ).first
             if not target.count():
                 trigger = self.dom("upload_trigger", selector=selector)
-                if not trigger:
-                    raise ListingError("未找到该字段的本地上传控件。")
-                target = self.page.locator(trigger)
+                target = (
+                    self.page.locator(trigger)
+                    if trigger
+                    else PageAI(self.page, self.client, self.cancel, self.log).find(
+                        "定位此字段的上传图片入口，可悬停展开本地上传菜单", scope
+                    )
+                )
             target.hover()
             local = self.page.get_by_text("本地上传", exact=True)
             if local.count() and local.last.is_visible():
@@ -175,6 +229,14 @@ class DouyinPage:
                 if button.count() == 1 and button.is_visible():
                     button.click()
                     return
+            if self.client is not None:
+                target = PageAI(self.page, self.client, self.cancel, self.log).find(
+                    "在当前弹窗确认这一步操作，定位含义相同的按钮：" + "/".join(names),
+                    dialog,
+                    allow_save="保存草稿" in names,
+                )
+                target.click(timeout=10000)
+                return
 
     def replace_images(self, names, paths):
         selector = self.section(*names)
@@ -185,28 +247,31 @@ class DouyinPage:
 
     def create(self, product):
         self.session.goto(ENTRY_URL)
-        self.click("新建商品")
         popups = []
 
         def capture(page):
             popups.append(page)
 
-        self.page.on("popup", capture)
-        self.click("单商品")
-        self.wait(
-            lambda: bool(popups)
-            or self.page.get_by_text("本地上传", exact=True).count() > 0,
-            "新建商品页面未打开",
-            timeout=30,
-        )
-        self.page.remove_listener("popup", capture)
+        source = self.page
+        source.on("popup", capture)
+        try:
+            self.open_create_menu()
+            self.click("单商品")
+            self.wait(
+                lambda: bool(popups)
+                or self.page.get_by_text("本地上传", exact=True).count() > 0,
+                "新建商品页面未打开",
+                timeout=30,
+            )
+        finally:
+            source.remove_listener("popup", capture)
         if popups:
             if len(popups) != 1:
                 raise ListingError("新建商品打开多个页面，无法确认当前货号页面。")
             self.page = self.session.page = popups[0]
             if hasattr(self.session, "own_page"):
                 self.session.own_page(self.page)
-        local = self.page.get_by_text("本地上传", exact=True).first
+        local = self.control("本地上传")
         local.wait_for(state="visible", timeout=20000)
         with self.page.expect_file_chooser() as chooser:
             local.click()
@@ -504,9 +569,12 @@ class DouyinPage:
 
     def save_draft(self):
         self.check()
-        button = self.page.get_by_role("button", name="保存草稿", exact=True)
-        if button.count() != 1:
-            raise ListingError("保存草稿按钮不唯一，未执行保存。")
+        button = self.visible_control("保存草稿")
+        if button is None:
+            button = PageAI(self.page, self.client, self.cancel, self.log).find(
+                "保存草稿",
+                allow_save=True,
+            )
         success = re.compile("草稿保存成功|保存成功|已保存至草稿箱|已保存到草稿箱")
         existing = self.page.get_by_text(success)
         if any(existing.nth(i).is_visible() for i in range(existing.count())):

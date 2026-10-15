@@ -452,6 +452,14 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
                     assert "fixture-login=already-logged-in" in session.page.evaluate(
                         "document.cookie"
                     )
+                    from suite.listing.page_ai import PageAI
+
+                    navigation = NavigationClient(lambda *_: ("target", "新建商品 ⌄"))
+                    target = PageAI(session.page, navigation, threading.Event()).find(
+                        "创建商品入口"
+                    )
+                    assert "新建商品" in target.inner_text()
+                    assert len(navigation.calls) == 1
             except BaseException as exc:
                 errors.append(exc)
 
@@ -490,3 +498,103 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
         if browser.poll() is None:
             os.killpg(browser.pid, 15)
         browser.wait(10)
+
+
+class NavigationClient:
+    def __init__(self, decide):
+        self.decide, self.calls = decide, []
+
+    def generate(self, parts, schema):
+        candidates = json.loads(parts[0]["text"].split("\n候选：", 1)[1])
+        self.calls.append((parts, candidates))
+        action, text = self.decide(len(self.calls), candidates)
+        candidate = next((c for c in candidates if c["text"] == text), None)
+        return {
+            "action": action,
+            "candidate_id": candidate["id"] if candidate else "not-a-real-id",
+            "confidence": 0.78,
+            "reason": "根据当前页面图像识别菜单入口",
+        }
+
+
+def test_page_ai_hovers_then_clicks_a_renamed_menu(session):
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            """<style>#menu{display:none}#entry:hover #menu{display:block}</style>
+            <div id="entry"><button>创建货品</button><div id="menu"><button onclick="window.picked=true">独立商品</button></div></div>"""
+        )
+        client = NavigationClient(
+            lambda number, _: (
+                ("hover", "创建货品") if number == 1 else ("target", "独立商品")
+            )
+        )
+        page = DouyinPage(s, threading.Event(), client=client)
+        page.click("单商品")
+        assert s.page.evaluate("window.picked") is True
+        assert len(client.calls) == 2
+        assert all(
+            parts[1]["inlineData"]["mimeType"] == "image/jpeg"
+            for parts, _ in client.calls
+        )
+        assert "独立商品" not in [c["text"] for c in client.calls[0][1]]
+        assert "独立商品" in [c["text"] for c in client.calls[1][1]]
+        s.page.evaluate("window.audit=[]")
+
+
+def test_page_ai_refuses_publish_and_unlisted_candidates(session):
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            '<button onclick="window.published=true">发布 商品</button><button>其他</button>'
+        )
+        client = NavigationClient(lambda *_: ("target", "发布 商品"))
+        page = DouyinPage(s, threading.Event(), client=client)
+        with pytest.raises(ListingError, match="涉及发布"):
+            page.click("继续生成")
+        assert s.page.evaluate("window.published || false") is False
+        s.page.locator("button").first.evaluate("e=>e.textContent='下架'")
+        page.client = NavigationClient(lambda *_: ("target", "下架"))
+        with pytest.raises(ListingError, match="涉及发布"):
+            page.click("继续生成")
+        assert s.page.evaluate("window.published || false") is False
+        client = NavigationClient(lambda *_: ("target", "页面中不存在的控件"))
+        page.client = client
+        with pytest.raises(ListingError, match="不属于当前页面候选"):
+            page.click("继续生成")
+        s.page.evaluate("window.audit=[]")
+
+
+def test_page_ai_does_not_click_after_cancel_or_target_disappears(session):
+    from suite.listing.models import Cancelled
+
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            '<button id="candidate" onclick="window.clicked=true">新的下一步</button>'
+        )
+        cancel = threading.Event()
+
+        def cancel_decision(*_):
+            cancel.set()
+            return "target", "新的下一步"
+
+        client = NavigationClient(cancel_decision)
+        page = DouyinPage(s, cancel, client=client)
+        with pytest.raises(Cancelled):
+            page.click("继续生成")
+        assert s.page.evaluate("window.clicked || false") is False
+        cancel.clear()
+
+        def remove_decision(number, *_):
+            if number > 1:
+                return "not_found", ""
+            s.page.locator("#candidate").evaluate("e=>e.remove()")
+            return "target", "新的下一步"
+
+        client = NavigationClient(remove_decision)
+        page.client = client
+        with pytest.raises(ListingError, match="暂未定位"):
+            page.click("继续生成")
+        assert s.page.evaluate("window.clicked || false") is False
+        s.page.evaluate("window.audit=[]")

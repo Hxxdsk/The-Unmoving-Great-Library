@@ -58,12 +58,19 @@ class EdgeSession:
             raise ListingError("只允许进入抖店商家后台页面。")
         self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
+    def wait_product_list(self, timeout):
+        self.page.wait_for_function(
+            """() => [...document.querySelectorAll('button,[role=button],a,span,h1,h2,h3')].some(e => {
+          const s=getComputedStyle(e), text=(e.innerText||'').replace(/\\s+/g,'').trim();
+          return text.length<35 && /新建商品|创建商品|商品管理|商品列表/.test(text) && e.getClientRects().length && s.visibility!=='hidden' && s.display!=='none';
+        })""",
+            timeout=timeout,
+        )
+
     def open_login(self):
         self.goto(ENTRY_URL)
         try:
-            self.page.get_by_text("新建商品", exact=True).first.wait_for(
-                state="visible", timeout=5000
-            )
+            self.wait_product_list(5000)
         except Exception:
             return "已连接当前 Edge。请在工具新建的抖店页完成登录或验证，再开始任务。"
         return "已连接当前 Edge，沿用现有抖店登录；其他标签页可正常使用。"
@@ -71,9 +78,7 @@ class EdgeSession:
     def check_login(self):
         self.goto(ENTRY_URL)
         try:
-            self.page.get_by_text("新建商品", exact=True).first.wait_for(
-                state="visible", timeout=20000
-            )
+            self.wait_product_list(20000)
         except Exception:
             raise ListingError(
                 "请在工具新建的抖店页完成登录或验证，再重试；无需关闭 Edge。"

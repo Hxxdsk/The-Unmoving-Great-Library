@@ -84,6 +84,7 @@ class BatchRunner:
                         session,
                         self.cancel,
                         lambda text: self.log(f"[{product.sku}] {text}"),
+                        client=self.client,
                     )
 
                     def advance(name, percent):
