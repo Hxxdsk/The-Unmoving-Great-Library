@@ -309,7 +309,7 @@ class ListingWindow(QMainWindow):
         prefix = (
             "在工作页点击正确控件（仅定位，由程序执行）："
             if mode == "pick"
-            else "在工作页完成这一步，程序确认后自动记忆："
+            else "在工作页悬停或点击，程序会观察结果继续；也可点检查继续："
         )
         self.manual_text.setText(prefix + goal)
         self.manual_resume.setVisible(mode == "record")

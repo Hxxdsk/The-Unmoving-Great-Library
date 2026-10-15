@@ -96,6 +96,7 @@ class BatchRunner:
                         nonlocal stage
                         page.confirm_memory()
                         stage = name
+                        page.phase = name
                         journal.update(
                             product,
                             status="running",

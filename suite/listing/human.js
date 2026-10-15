@@ -18,8 +18,8 @@
   const send=(kind,target)=>window[binding]({token,kind,target,url:location.origin+location.pathname});
   const hover=e=>{
     if(!e.isTrusted||expired())return;
-    const target=e.target.closest('button,a,[role=button],[role=menuitem]');
-    if(!target)return;
+    const target=e.target.closest('button,a,[role=button],[role=menuitem],[aria-haspopup]')||e.target;
+    if(!target || (!target.matches('button,a,[role=button],[role=menuitem],[aria-haspopup]') && getComputedStyle(target).cursor!=='pointer'))return;
     const d=describe(target),key=JSON.stringify(d);
     if(key!==lastHover){lastHover=key;send('hover',d);}
   };

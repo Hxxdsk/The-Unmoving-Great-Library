@@ -58,6 +58,17 @@ def safe_target(target, allow_save=False):
         raise ListingError("该位置涉及发布、上下架、删除商品或提前保存，未执行。")
 
 
+def semantic_text(value):
+    text = re.sub(r"[\s⌄∨▼▾：:·]+", "", value).casefold()
+    for names in (
+        ("新建商品", "创建商品", "新增商品", "创建货品"),
+        ("单商品", "单个商品", "独立商品", "单品商品"),
+    ):
+        if text in names:
+            return names[0]
+    return text
+
+
 def resolve(page, descriptor, root=None, allow_save=False):
     """Use semantic selectors first; a CSS fallback must still match identity."""
     if not isinstance(descriptor, dict):
@@ -81,6 +92,17 @@ def resolve(page, descriptor, root=None, allow_save=False):
             )
     if text:
         choices.append(scope.get_by_text(text, exact=True))
+        # Match known equivalent labels despite arrows/spacing or a new DOM path.
+        labels = scope.locator(tag).evaluate_all(
+            "nodes=>nodes.map((e,i)=>({i,text:(e.innerText||'').trim(),visible:!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'}))"
+        )
+        equivalent = [
+            row["i"]
+            for row in labels
+            if row["visible"] and semantic_text(row["text"]) == semantic_text(text)
+        ]
+        if len(equivalent) == 1:
+            choices.append(scope.locator(tag).nth(equivalent[0]))
     css = descriptor.get("css", "")
     if re.fullmatch(r"[a-z0-9:()>\-\s]+", css or ""):
         choices.append(scope.locator(css))
@@ -94,7 +116,7 @@ def resolve(page, descriptor, root=None, allow_save=False):
         current = target.evaluate(DESCRIBE)
         # Never replay an old position when its button has changed meaning.
         matches = (
-            current["text"] == text
+            semantic_text(current["text"]) == semantic_text(text)
             if text
             else any(
                 current["attrs"].get(key) == value
@@ -156,6 +178,31 @@ class WorkflowStore:
             key=lambda r: (r.get("failures", 0), -r.get("updated", 0)),
         )
 
+    def hints(self, goal, page, scope="page"):
+        """Related successes are context for AI, never permission to replay blindly."""
+        records = [
+            r
+            for rows in self.steps().values()
+            for r in rows
+            if r.get("goal") == goal
+            and r.get("scope", "page") == scope
+            and r.get("page", "").split("/", 1)[0] == page.split("/", 1)[0]
+        ]
+        records.sort(key=lambda r: (r.get("failures", 0), -r.get("updated", 0)))
+        return [
+            {
+                "目标": r["goal"],
+                "适用页面": r["page"],
+                "动作": [
+                    {"动作": a["kind"], "控件": a.get("target", {}).get("text", "")}
+                    for a in r["actions"]
+                ],
+                "结果": r.get("outcome", ""),
+                "失效次数": r.get("failures", 0),
+            }
+            for r in records[:3]
+        ]
+
     def remember(self, goal, page, actions, scope="page", source="程序", outcome=""):
         if not actions or len(actions) > 24:
             return
@@ -188,9 +235,13 @@ class WorkflowStore:
             self.save()
 
 
-def replay(page, actions, root=None, allow_save=False, cancel=None, observe=None):
+def replay(
+    page, actions, root=None, allow_save=False, cancel=None, observe=None, done=None
+):
     """Replay a verified recipe; callers must check its expected page result."""
-    for action in actions:
+    for index, action in enumerate(actions):
+        if done and done():
+            return True
         if observe:
             page = observe() or page
         if cancel and cancel.is_set():
@@ -202,6 +253,16 @@ def replay(page, actions, root=None, allow_save=False, cancel=None, observe=None
             continue
         target = resolve(page, action.get("target"), root, allow_save)
         if target is None:
+            # A submenu may already be open: skip obsolete preparation only
+            # when the very next expected control is currently visible.
+            if kind in ("hover", "click") and index + 1 < len(actions):
+                following = actions[index + 1]
+                if (
+                    following.get("kind") in ("target", "click")
+                    and resolve(page, following.get("target"), root, allow_save)
+                    is not None
+                ):
+                    continue
             return None
         if kind == "target":
             return target

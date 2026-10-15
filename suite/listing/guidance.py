@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 import re
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -68,11 +69,13 @@ class UserGuide:
         observe=None,
         root=None,
         allow_save=False,
+        allow_partial=False,
     ):
         self.events, self.active = [], secrets.token_hex(16)
         self.resume.clear()
         self.skip.clear()
         current, installed = page, []
+        clicks_seen, settle_since = 0, None
         self.notify(goal, mode)
         try:
             while True:
@@ -101,8 +104,19 @@ class UserGuide:
                         return target, self.recipe(target_only=True)
                 if mode == "record" and condition and condition():
                     return None, self.recipe()
+                if mode == "record" and allow_partial:
+                    clicks = sum(e["kind"] == "click" for e in self.events)
+                    if clicks != clicks_seen:
+                        clicks_seen, settle_since = clicks, time.monotonic()
+                    if (
+                        settle_since is not None
+                        and time.monotonic() - settle_since > 0.7
+                    ):
+                        return None, self.recipe()
                 if self.resume.is_set():
                     self.resume.clear()
+                    if mode == "record" and allow_partial and self.events:
+                        return None, self.recipe()
                     self.notify("当前页面还未到达所需步骤，请继续操作：" + goal, mode)
                 current.wait_for_timeout(100)
         finally:

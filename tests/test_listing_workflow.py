@@ -278,3 +278,180 @@ def test_abandoned_guidance_releases_page_clicks(session):
         s.page.locator("#go").click()
         assert s.page.evaluate("window.done === true")
         assert not s.page.evaluate("Boolean(window.__glHumanStop)")
+
+
+def test_goal_navigation_understands_portal_menu_without_required_keywords(
+    tmp_path, session
+):
+    from test_listing import NavigationClient
+
+    product = make_product(tmp_path)
+    script = r"""<script>
+    list=()=>{app.innerHTML='<button id="entry" onmouseenter="portal.style.display=\'block\'">智能建档</button>';
+    let p=document.createElement('div');p.id='portal';p.setAttribute('role','menu');p.style='display:none;position:fixed;top:65px;left:0;background:white;z-index:999';
+    p.innerHTML='<button onclick="this.parentElement.remove();wizard()">从图片创建</button>';document.body.append(p)};list();</script>"""
+    with session as s:
+        s.context.unroute("**/*")
+        s.context.route(
+            "**/*",
+            lambda route: route.fulfill(
+                content_type="text/html; charset=utf-8",
+                body=FIXTURE.read_text() + script,
+            ),
+        )
+        s.check_login()
+        client = NavigationClient(
+            lambda n, _: ("hover", "智能建档") if n == 1 else ("click", "从图片创建")
+        )
+        store = WorkflowStore(tmp_path / "memory.json")
+        page = DouyinPage(s, threading.Event(), client=client, memory=store)
+        page.create(product)
+        assert "/edit" in page.editor_url
+        assert len(client.calls) == 2
+        assert any(
+            c["text"] == "从图片创建" and c["overlay"] for c in client.calls[1][1]
+        )
+        prompt = client.calls[0][0][0]["text"]
+        assert (
+            "当前阶段" in prompt
+            and "完整流程" in prompt
+            and "不要求固定按钮文字" in prompt
+        )
+        # A successful route can be reused without API calls.
+        page = DouyinPage(s, threading.Event(), memory=WorkflowStore(store.path))
+        page.create(product)
+        assert "/edit" in page.editor_url
+
+
+def test_human_real_click_then_ai_continues_from_open_overlay(tmp_path, session):
+    from test_listing import NavigationClient
+
+    product = make_product(tmp_path)
+    script = r"""<script>list=()=>{app.innerHTML='<button id="assist" onclick="portal.style.display=\'block\';window.humanClicks=(window.humanClicks||0)+1">导入资料</button>';let p=document.createElement('div');p.id='portal';p.setAttribute('role','menu');p.style='display:none;position:fixed;top:65px;background:white';p.innerHTML='<button onclick="this.parentElement.remove();wizard()">图片建档</button>';document.body.append(p)};list()</script>"""
+    with session as s:
+        s.context.unroute("**/*")
+        s.context.route(
+            "**/*",
+            lambda route: route.fulfill(
+                content_type="text/html; charset=utf-8",
+                body=FIXTURE.read_text() + script,
+            ),
+        )
+        s.check_login()
+
+        class Guide(UserGuide):
+            def install(self, page, mode):
+                super().install(page, mode)
+                assert mode == "record"
+                page.locator("#assist").click()
+
+        cancel = threading.Event()
+        client = NavigationClient(
+            lambda n, _: ("not_found", "") if n == 1 else ("click", "图片建档")
+        )
+        page = DouyinPage(s, cancel, client=client, guide=Guide(cancel))
+        page.create(product)
+        assert "/edit" in page.editor_url
+        assert s.page.evaluate("window.humanClicks") == 1
+        assert len(client.calls) == 2
+        assert "用户已操作" in client.calls[1][0][0]["text"]
+
+
+def test_portal_candidates_prioritized_outside_field_scope(session):
+    from suite.listing.page_ai import CANDIDATES
+
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            '<section id="field">字段</section><div id="list"></div><div role="menu" style="position:fixed;top:0;right:0;z-index:999;background:white"><button>悬浮菜单入口</button></div>'
+        )
+        s.page.evaluate(
+            "document.querySelector('#list').innerHTML=Array.from({length:260},(_,i)=>'<button>商品'+i+'</button>').join('')"
+        )
+        snapshot = s.page.locator("#field").evaluate(CANDIDATES)
+        assert any(
+            c["text"] == "悬浮菜单入口" and c["overlay"] for c in snapshot["candidates"]
+        )
+
+
+def test_memory_adapts_alias_and_skips_already_open_menu(tmp_path, session):
+    from suite.listing.workflow import replay
+
+    store = WorkflowStore(tmp_path / "memory.json")
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            '<button id="old">新建商品 ⌄</button><button>单商品</button>'
+        )
+        first = s.page.locator("#old").evaluate(DESCRIBE)
+        second = s.page.get_by_text("单商品", exact=True).evaluate(DESCRIBE)
+        actions = [
+            {"kind": "hover", "target": first},
+            {"kind": "target", "target": second},
+        ]
+        store.remember("打开创建页", page_key(s.page), actions)
+        s.page.set_content(
+            '<button>创建商品</button><button onclick="window.picked=true">独立商品</button>'
+        )
+        assert resolve(s.page, first).inner_text() == "创建商品"
+        s.page.get_by_text("创建商品", exact=True).evaluate("e=>e.remove()")
+        target = replay(s.page, actions)
+        target.click()
+        assert s.page.evaluate("window.picked") is True
+        assert (
+            store.hints("打开创建页", "fxg.jinritemai.com/new/list")[0]["动作"][0][
+                "控件"
+            ]
+            == "新建商品 ⌄"
+        )
+
+
+def test_later_navigation_uses_phase_and_observes_result(tmp_path, session):
+    from test_listing import NavigationClient
+
+    with session as s:
+        s.check_login()
+        s.page.locator("#app").evaluate(
+            "e=>e.innerHTML='<button onclick=\"editor()\">开始整理</button>'"
+        )
+        client = NavigationClient(lambda *_: ("click", "开始整理"))
+        store = WorkflowStore(tmp_path / "memory.json")
+        page = DouyinPage(s, threading.Event(), client=client, memory=store)
+        page.phase = "主图已上传，需要继续生成编辑页"
+        page.navigation_wait(
+            lambda: page.creation_state() == "editor", "进入商品编辑页", timeout=0.01
+        )
+        assert page.creation_state() == "editor"
+        assert "主图已上传，需要继续生成编辑页" in client.calls[0][0][0]["text"]
+        assert store.recipes("流程：进入商品编辑页", "fxg.jinritemai.com/ffa/g/list")
+
+
+def test_ai_done_is_not_accepted_without_actual_page_progress(session):
+    from test_listing import NavigationClient
+    from suite.listing.models import ListingError
+
+    with session as s:
+        s.check_login()
+        s.page.set_content("<button>其他入口</button>")
+        client = NavigationClient(lambda *_: ("done", ""))
+        page = DouyinPage(s, threading.Event(), client=client)
+        with pytest.raises(ListingError):
+            page.reach_creation()
+        assert len(client.calls) == 3
+
+
+def test_memory_stops_when_current_page_reaches_goal_early(session):
+    from suite.listing.workflow import replay
+
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            '<button id="go" onclick="window.ready=true">进入</button><button id="extra" onclick="window.extra=true">旧流程后续</button>'
+        )
+        actions = [
+            {"kind": "click", "target": s.page.locator("#go").evaluate(DESCRIBE)},
+            {"kind": "click", "target": s.page.locator("#extra").evaluate(DESCRIBE)},
+        ]
+        replay(s.page, actions, done=lambda: s.page.evaluate("window.ready===true"))
+        assert s.page.evaluate("window.ready===true")
+        assert not s.page.evaluate("window.extra===true")

@@ -31,6 +31,7 @@ class DouyinPage:
         self.pending = []
         self.last_plan = None
         self.popups = []
+        self.phase = "进入单商品创建流程"
 
     def check(self):
         if self.cancel.is_set():
@@ -134,6 +135,17 @@ class DouyinPage:
             self.memory_failed(recipe)
         return None
 
+    def ai_context(self, goal):
+        return {
+            "完整流程": "进入单商品创建页 → 本地上传800主图前5张 → 网站推荐标题第一个 → 继续生成编辑页 → 替换3:4、白底、详情、水洗标 → 填当前货号 → 48小时发货 → 颜色正面图、尺码和体重 → 价格399、目标现货库存1000 → 校验 → 仅保存草稿",
+            "当前阶段": self.phase,
+            "本次目的": goal,
+            "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
+            "成功经验": (
+                self.memory.hints(goal, page_key(self.page)) if self.memory else []
+            ),
+        }
+
     def control(self, text, root=None, allow_save=False):
         self.check()
         goal = text if isinstance(text, str) else text.pattern
@@ -148,7 +160,12 @@ class DouyinPage:
                 source = "AI"
                 try:
                     target = PageAI(
-                        self.page, self.client, self.cancel, self.log, trace=actions
+                        self.page,
+                        self.client,
+                        self.cancel,
+                        self.log,
+                        trace=actions,
+                        context=self.ai_context(goal),
                     ).find(goal, root, allow_save)
                 except Cancelled:
                     raise
@@ -372,7 +389,10 @@ class DouyinPage:
             return "editor"
         if self.dom("recommendations"):
             return "titles"
-        if self.visible_control("本地上传") is not None:
+        if (
+            self.visible_control(re.compile(r"^(本地上传|上传资料|上传文件|选择文件)$"))
+            is not None
+        ):
             return "upload"
         if self.visible_control("单商品") is not None:
             return "menu"
@@ -397,6 +417,7 @@ class DouyinPage:
                         recipe["actions"],
                         cancel=self.cancel,
                         observe=lambda: (self.creation_state(), self.page)[1],
+                        done=condition,
                     )
                     self.wait(condition, message, timeout=3)
                     self.log("已按记忆恢复流程：" + message)
@@ -405,65 +426,233 @@ class DouyinPage:
                     raise
                 except Exception:
                     self.memory_failed(recipe)
+        deadline = time.monotonic() + timeout
         try:
-            self.wait(condition, message, timeout)
+            self.wait(condition, message, min(timeout, 8))
+            return
         except Cancelled:
             raise
         except ListingError:
-            if not self.guide:
-                raise
             self.discard_pending()
-            self.log("等待用户在工作页完成：" + message)
-            _, actions = self.guide.run(
+        actions, history, humans = [], [], 0
+        for attempt in range(8):
+            self.check()
+            while not condition() and self.dom("busy") and time.monotonic() < deadline:
+                self.page.wait_for_timeout(500)
+                self.check()
+            if condition():
+                if self.memory and actions:
+                    try:
+                        self.memory.remember(
+                            key,
+                            before,
+                            actions,
+                            source="流程决策",
+                            outcome=page_key(self.page),
+                        )
+                    except Exception as exc:
+                        self.log("流程记忆暂不可写：" + str(exc))
+                self.confirm_memory()
+                return
+            error = message
+            if self.client is not None:
+                try:
+                    result = PageAI(
+                        self.page,
+                        self.client,
+                        self.cancel,
+                        self.log,
+                        trace=actions,
+                        context=self.ai_context(key),
+                    ).find(
+                        message + "；按实际页面寻找可推进此阶段的操作，处理中先等待",
+                        navigate=True,
+                        history=history[-8:],
+                    )
+                    history.append(result)
+                    self.log(
+                        "AI 下一步："
+                        + str(result.get("reason") or result.get("action"))
+                    )
+                    self.page.wait_for_timeout(500)
+                    if len(history) < 2 or history[-1] != history[-2]:
+                        continue
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    error = str(exc)
+            if not self.guide or humans >= 3:
+                raise ListingError(error)
+            self.log("等待用户完成流程步骤：" + message)
+            _, guided = self.guide.run(
                 self.page,
                 message,
                 mode="record",
                 condition=condition,
                 observe=lambda: (self.creation_state(), self.page)[1],
+                allow_partial=True,
             )
+            actions = guided if humans == 0 else actions + guided
+            humans += 1
+            history.append({"action": "用户已操作", "页面状态": self.creation_state()})
+        # A final click may have reached the destination on the last round.
+        if condition():
             if self.memory and actions:
                 try:
                     self.memory.remember(
                         key,
                         before,
                         actions,
-                        source="用户指导",
+                        source="流程决策",
                         outcome=page_key(self.page),
                     )
                 except Exception as exc:
-                    self.log("流程记忆暂不可写，本次继续运行：" + str(exc))
-                    self.memory = None
+                    self.log("流程记忆暂不可写：" + str(exc))
             self.confirm_memory()
+            return
+        raise ListingError(message + "；多次观察后仍未推进，已保留进度。")
+
+    def reach_creation(self):
+        """Advance toward a page outcome, not a compulsory button caption."""
+        goal = "流程：打开单商品创建页"
+        before, actions, history = page_key(self.page), [], []
+        ready = lambda: self.creation_state() in ("upload", "titles", "editor")
+        if self.memory:
+            for recipe in self.memory.recipes(goal, before):
+                if recipe.get("failures", 0) >= 3:
+                    continue
+                try:
+                    replay(
+                        self.page,
+                        recipe["actions"],
+                        cancel=self.cancel,
+                        observe=lambda: (self.creation_state(), self.page)[1],
+                        done=ready,
+                    )
+                    self.page.wait_for_timeout(400)
+                    if ready():
+                        self.log("已按记忆恢复流程：打开单商品创建页")
+                        return
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    history.append("旧记忆需按当前页面调整：" + str(exc)[:120])
+                self.memory_failed(recipe)
+        attempted, ai_calls, human_steps = set(), 0, 0
+        loading_since = None
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            self.check()
+            state = self.creation_state()
+            if ready():
+                if self.memory and actions:
+                    try:
+                        self.memory.remember(
+                            goal,
+                            before,
+                            actions,
+                            source="流程决策",
+                            outcome=page_key(self.page),
+                        )
+                    except Exception as exc:
+                        self.log("流程记忆暂不可写：" + str(exc))
+                self.confirm_memory()
+                return
+            if state == "loading":
+                loading_since = loading_since or time.monotonic()
+                if time.monotonic() - loading_since < 3:
+                    self.page.wait_for_timeout(500)
+                    continue
+            else:
+                loading_since = None
+            # Cheap obvious paths first; every attempted action is followed by
+            # fresh state observation and is not blindly repeated.
+            option = self.visible_control(
+                re.compile(r"^(单商品|单个商品|独立商品|单品商品)$")
+            )
+            entry = self.visible_control(
+                re.compile(r"^(新建商品|创建商品|新增商品|创建货品)[\s⌄∨▼▾]*$")
+            )
+            target, kind = (option, "click") if option is not None else (entry, "hover")
+            if target is not None:
+                descriptor = target.evaluate(DESCRIBE)
+                identity = (kind, str(descriptor))
+                if identity in attempted and option is None:
+                    kind, identity = "click", ("click", str(descriptor))
+                if identity not in attempted:
+                    attempted.add(identity)
+                    safe_target(target)
+                    actions.append({"kind": kind, "target": descriptor})
+                    if kind == "hover":
+                        target.hover(timeout=4000)
+                    else:
+                        target.click(timeout=5000)
+                    self.page.wait_for_timeout(400)
+                    history.append({"action": kind, "text": descriptor["text"]})
+                    continue
+            error = "当前页面尚未进入创建流程"
+            if self.client is not None and ai_calls < 10:
+                ai_calls += 1
+                try:
+                    context = self.ai_context(goal)
+                    context["观察状态"] = state
+                    context["本轮已执行"] = history[-10:]
+                    result = PageAI(
+                        self.page,
+                        self.client,
+                        self.cancel,
+                        self.log,
+                        trace=actions,
+                        context=context,
+                    ).find(
+                        "进入可上传本款主图的单商品创建流程，或已生成的当前商品编辑页；选择当前有效的下一步，不要求固定按钮文字",
+                        navigate=True,
+                        history=history[-10:],
+                    )
+                    history.append(result)
+                    self.log(
+                        "AI 下一步："
+                        + str(result.get("reason") or result.get("action"))
+                    )
+                    if len(history) < 3 or history[-1] != history[-2]:
+                        continue
+                    error = "连续动作未推进，改由用户指导"
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    error = str(exc)
+                    history.append({"error": error[:160]})
+            if not self.guide or human_steps >= 6:
+                raise ListingError(error + "；创建流程未推进，当前款已停止。")
+            self.discard_pending()
+            self.log("等待用户操作创建入口或悬浮菜单：" + error)
+            # Let the real click happen, then observe its result. Do not replay
+            # an intercepted submenu choice as a hover on the old parent.
+            _, guided = self.guide.run(
+                self.page,
+                "进入单商品创建流程；可悬停展开菜单，再点击有效入口",
+                mode="record",
+                condition=ready,
+                observe=lambda: (self.creation_state(), self.page)[1],
+                allow_partial=True,
+            )
+            human_steps += 1
+            actions = guided if human_steps == 1 else actions + guided
+            history.append({"action": "用户已操作", "页面状态": self.creation_state()})
+            ai_calls = max(0, ai_calls - 2)
+        raise ListingError("创建流程长时间未推进，请检查页面或重新指导。")
 
     def create(self, product):
         self.session.goto(ENTRY_URL)
         self.popups = []
-        source = self.page
 
         def capture(page):
             self.popups.append(page)
 
-        source.on("popup", capture)
+        self.session.context.on("page", capture)
         uploaded = False
         try:
-            ready = lambda: self.creation_state() in ("upload", "titles", "editor")
-            if self.memory and self.memory.recipes(
-                "流程：打开单商品创建页", page_key(self.page)
-            ):
-                self.navigation_wait(ready, "打开单商品创建页", timeout=3)
-            else:
-                self.open_create_menu()
-                state = self.creation_state()
-                if (
-                    state not in ("upload", "titles", "editor", "loading")
-                    and not self.popups
-                ):
-                    self.click("单商品")
-            self.navigation_wait(
-                lambda: self.creation_state() in ("upload", "titles", "editor"),
-                "打开单商品创建页",
-                timeout=20,
-            )
+            self.reach_creation()
             state = self.creation_state()
             if state == "upload":
                 local = self.control("本地上传")
@@ -474,11 +663,14 @@ class DouyinPage:
                 uploaded = True
                 self.wait(
                     lambda: not self.dom("busy")
-                    and self.visible_control(re.compile("下一步")) is not None
-                    and self.visible_control(re.compile("下一步")).is_enabled(),
+                    and (
+                        self.visible_control(re.compile("下一步")) is None
+                        or self.visible_control(re.compile("下一步")).is_enabled()
+                    ),
                     "商品主图上传未完成",
                     timeout=90,
                 )
+                self.phase = "800主图已上传，进入网站推荐标题或商品编辑页"
                 self.click(re.compile(r"^下一步.*"))
                 self.navigation_wait(
                     lambda: self.creation_state() in ("titles", "editor"),
@@ -489,6 +681,7 @@ class DouyinPage:
             if state == "titles":
                 recommendation = self.dom("recommendations")[0]
                 self.page.locator(recommendation["selector"]).click()
+                self.phase = "已选择网站第一个推荐标题，需要继续生成商品编辑页"
                 self.click(re.compile(r"^确认信息.*继续生成$|^继续生成$"))
                 self.navigation_wait(
                     lambda: self.creation_state() == "editor",
@@ -503,7 +696,7 @@ class DouyinPage:
                 self.replace_images(("主图",), product.main)
             self.confirm_memory()
         finally:
-            source.remove_listener("popup", capture)
+            self.session.context.remove_listener("page", capture)
 
     def resume(self, url):
         self.session.goto(url)
