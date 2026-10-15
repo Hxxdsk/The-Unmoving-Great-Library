@@ -123,20 +123,19 @@ class BatchRunner:
                                 page.resume(old["editor_url"])
                             else:
                                 page.create(product)
-                            page.tab("属性信息")
-                            sku_control = page.fill_sku(
-                                product.sku, require_same=bool(old.get("editor_url"))
-                            )
-                            advance("替换3:4与白底图片", 25)
+                            # Resume identity is checked before touching existing images.
+                            if old.get("editor_url"):
+                                page.tab("属性信息")
+                                page.fill_sku(product.sku, require_same=True)
+                            advance("按页面顺序填写图文信息", 25)
                             page.tab("图文信息")
-                            page.replace_images(
-                                ("主图3:4", "主图3：4"), product.portrait
-                            )
-                            page.replace_images(("白底图",), product.images["白底"])
+                            fields = [
+                                (("主图3:4", "主图3：4"), product.portrait),
+                                (("白底图",), product.images["白底"]),
+                            ]
                             if not page.details_prepared:
-                                page.replace_images(
-                                    ("商品详情",), product.images["详情"]
-                                )
+                                fields.append((("商品详情",), product.images["详情"]))
+                            page.replace_images_in_page_order(fields)
                             advance("水洗标与货号", 40)
                             page.tab("属性信息")
                             page.replace_images(
@@ -156,11 +155,13 @@ class BatchRunner:
                             )
                             for note in analysis.notes:
                                 page.log(note)
-                            advance("网站AI解析尺码表", 62)
-                            page.parse_size_chart(product.images["尺码"], temp)
-                            advance("设置颜色规格图、尺码与体重备注", 74)
+                            advance("按页面顺序上传颜色规格图", 60)
                             page.set_color_photos(analysis)
+                            advance("填写尺码与体重备注", 70)
                             page.set_sizes(analysis.sizes)
+                            advance("网站AI解析尺码表", 78)
+                            page.parse_size_chart(product.images["尺码"], temp)
+                            page.reconcile_sizes_after_chart(analysis.sizes)
                             advance("批量价格与现货库存", 86)
                             page.batch_values(self.price, self.inventory)
                             advance("校验当前货号与规格", 93)

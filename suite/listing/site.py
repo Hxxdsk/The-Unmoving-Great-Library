@@ -10,7 +10,7 @@ from .models import ListingError, Cancelled, SaveUncertain
 from .browser import ENTRY_URL
 from .vision import normalize_size
 from .page_ai import PageAI, FORBIDDEN
-from .spec_reader import read_rows
+from .spec_reader import read_rows, SCRIPT as SPEC_SNAPSHOT
 from .workflow import DESCRIBE, page_key, scope_key, replay, safe_target
 
 DOM = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
@@ -29,6 +29,7 @@ class DouyinPage:
         self.editor_url = ""
         self.details_prepared = False
         self.spec_cache = {}
+        self.spec_layouts = {}
         self.client = client
         self.memory, self.guide = memory, guide
         self.pending = []
@@ -426,6 +427,31 @@ class DouyinPage:
         if self.photo_count(selector) != len(paths):
             raise ListingError("字段图片数量与当前货号资料不符。")
 
+    def replace_images_in_page_order(self, fields):
+        entries = [(names, self.section(*names), paths) for names, paths in fields]
+        positions = self.page.evaluate(
+            "selectors=>selectors.map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {y:r.y,x:r.x};})",
+            [e[1] for e in entries],
+        )
+        for index in sorted(
+            range(len(entries)),
+            key=lambda i: (round(positions[i]["y"] / 8), positions[i]["x"]),
+        ):
+            names, _, paths = entries[index]
+            # Uploads can remount adjacent React fields; resolve each fresh.
+            self.replace_images(names, paths)
+
+    def reconcile_sizes_after_chart(self, sizes):
+        desired = {normalize_size(r["name"]): r["weight"] for r in sizes}
+        _, records = self.specs("尺码大小", allow_empty=True)
+        current = {
+            normalize_size(r["name"]): self.page.locator(r["note"]).input_value()
+            for r in records
+        }
+        if current != desired:
+            self.log("尺码表识别改变了规格，补回 AI 尺码与体重备注")
+            self.set_sizes(sizes)
+
     def creation_state(self):
         # A navigation can advance directly, or open a new tool-owned tab.
         for candidate in list(self.popups):
@@ -770,6 +796,19 @@ class DouyinPage:
         )
         self.editor_url = self.page.url
 
+    def ordered_spec_rows(self, records):
+        positions = self.page.evaluate(
+            "selectors=>selectors.map(s=>{const r=document.querySelector(s).getBoundingClientRect();return {x:r.x,y:r.y};})",
+            [r["note"] for r in records],
+        )
+        return [
+            records[i]
+            for i in sorted(
+                range(len(records)),
+                key=lambda i: (round(positions[i]["y"] / 8), positions[i]["x"]),
+            )
+        ]
+
     def specs(self, label, allow_empty=False):
         selector, legacy = None, []
         try:
@@ -779,27 +818,61 @@ class DouyinPage:
             pass
         # Visible row geometry handles separate dropdown/note/icon wrappers,
         # selected values stored in inputs, and header-only legacy scopes.
+        snapshot = self.page.evaluate(SPEC_SNAPSHOT, label)
+        deadline = time.monotonic() + (0.5 if allow_empty else 2.5)
+        previous = None
+        while time.monotonic() < deadline:
+            self.check()
+            signature = tuple(r["note"] for r in snapshot.get("rows", []))
+            if signature and (
+                signature == previous or signature == self.spec_layouts.get(label)
+            ):
+                break
+            previous = signature
+            self.page.wait_for_timeout(150)
+            snapshot = self.page.evaluate(SPEC_SNAPSHOT, label)
+        self.spec_layouts[label] = tuple(r["note"] for r in snapshot.get("rows", []))
+        expected = len(snapshot.get("rows", []))
         region, layout = read_rows(
-            self.page, label, None, self.cancel, self.log, self.spec_cache
+            self.page,
+            label,
+            None,
+            self.cancel,
+            self.log,
+            self.spec_cache,
+            snapshot=snapshot,
         )
+        # An incomplete legacy result must not win simply because unknown OCR
+        # rows have not returned names yet. Bind by actual remark controls too.
+        expected_notes = {r["note"] for r in snapshot.get("rows", [])}
         if (
             legacy
-            and len(legacy) >= len(layout)
-            and len({r["name"] for r in legacy}) == len(legacy)
+            and len(legacy) == expected
+            and expected_notes == {r["note"] for r in legacy}
+            and len({r["name"] for r in legacy}) == expected
+            and all(
+                not r["name"].strip().isdigit() or label != "颜色分类" for r in legacy
+            )
         ):
-            return selector, legacy
+            return selector, self.ordered_spec_rows(legacy)
         if layout:
             self.log(
                 f"按实际布局读取{label}：{len(layout)} 项，"
                 + " / ".join(r["name"] for r in layout)
             )
-            return region, layout
+            return region, self.ordered_spec_rows(layout)
         if self.client is not None:
             region, layout = read_rows(
-                self.page, label, self.client, self.cancel, self.log, self.spec_cache
+                self.page,
+                label,
+                self.client,
+                self.cancel,
+                self.log,
+                self.spec_cache,
+                snapshot=snapshot,
             )
             if layout:
-                return region, layout
+                return region, self.ordered_spec_rows(layout)
         if allow_empty and (selector or region):
             return selector or region, []
         raise ListingError(
@@ -838,7 +911,11 @@ class DouyinPage:
             self.click("48小时")
 
     def set_color_photos(self, analysis):
-        for color, path in analysis.colors.items():
+        _, initial = self.specs("颜色分类")
+        if {r["name"] for r in initial} != set(analysis.colors):
+            raise ListingError("网站颜色与 AI 配图结果不一致，停止当前货号")
+        for color in [r["name"] for r in initial]:
+            path = analysis.colors[color]
             _, records = self.specs("颜色分类")
             record = next((row for row in records if row["name"] == color), None)
             if not record:

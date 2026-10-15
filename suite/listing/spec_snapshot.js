@@ -1,16 +1,25 @@
 (label) => {
   const norm=s=>String(s||'').replace(/[\s*＊]/g,'').replace(/[⌄∨▼▾×✕]/g,'').trim();
-  const shown=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>4&&r.height>4&&s.display!=='none'&&s.visibility!=='hidden';};
+  const shown=e=>{const r=e.getBoundingClientRect();if(r.width<=4||r.height<=4)return false;for(let n=e;n&&n!==document.body;n=n.parentElement){const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||Number(s.opacity)===0)return false;}return true;};
+  const headingMatch=(e,name)=>norm(e.innerText)===name||[...e.childNodes].some(n=>n.nodeType===3&&norm(n.textContent)===name);
+  const headingNodes=[...document.querySelectorAll('label,span,div,p,legend,strong,h1,h2,h3,h4')];
   const mark=e=>{if(!e)return null;if(!e.dataset.glId)e.dataset.glId='gl'+crypto.randomUUID().replaceAll('-','');return '[data-gl-id="'+e.dataset.glId+'"]';};
-  const headings=[...document.querySelectorAll('label,span,div,p,h1,h2,h3,h4')].filter(e=>shown(e)&&norm(e.innerText)===norm(label)).sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
+  const headings=headingNodes.filter(e=>shown(e)&&headingMatch(e,norm(label))).sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
   const heading=headings[0];if(!heading)return {rows:[],reason:'未找到规格标题'};
   const start=heading.getBoundingClientRect().bottom;
   const stops=new Set(label==='颜色分类'?['尺码大小','尺码表','价格与库存','价格库存']:['尺码表','价格与库存','价格库存']);
-  const end=Math.min(Infinity,...[...document.querySelectorAll('label,span,div,p,h1,h2,h3,h4')].filter(e=>shown(e)&&stops.has(norm(e.innerText))&&e.getBoundingClientRect().top>start).map(e=>e.getBoundingClientRect().top));
+  const end=Math.min(Infinity,...headingNodes.filter(e=>shown(e)&&[...stops].some(name=>headingMatch(e,name))&&e.getBoundingClientRect().top>start).map(e=>e.getBoundingClientRect().top));
   const inBand=e=>{const r=e.getBoundingClientRect();return shown(e)&&r.top>=start-4&&r.bottom<=end+4;};
-  const notes=[...document.querySelectorAll('input,textarea')].filter(e=>inBand(e)&&!['hidden','file','checkbox','radio','password'].includes(e.type)&&!e.disabled&&!e.readOnly&&(
-    /备注/.test([e.placeholder,e.getAttribute('aria-label')].join(' '))||norm(e.parentElement.innerText)==='备注'||
-    (!e.value&&!e.placeholder&&!e.closest('[role=combobox],[class*=select],[class*=Select]'))));
+  // Only actual remark fields are row anchors. Empty search boxes inside
+  // dropdowns are not remarks, even if their DOM rectangles have a size.
+  const noteCandidates=[...document.querySelectorAll('input,textarea')].filter(e=>inBand(e)&&!['hidden','file','checkbox','radio','password'].includes(e.type)&&!e.disabled&&!e.readOnly&&(
+    /备注/.test([e.placeholder,e.getAttribute('aria-label')].join(' '))||norm(e.parentElement.innerText)==='备注'));
+  const notes=[];
+  noteCandidates.sort((a,b)=>{const x=a.getBoundingClientRect(),y=b.getBoundingClientRect();return Math.abs(x.y-y.y)>8?x.y-y.y:x.x-y.x;});
+  for(const candidate of noteCandidates){
+    const r=candidate.getBoundingClientRect();
+    if(!notes.some(e=>{const p=e.getBoundingClientRect();return Math.abs(p.x-r.x)<4&&Math.abs(p.y-r.y)<4;}))notes.push(candidate);
+  }
   const controls=[...document.querySelectorAll('select,input,[role=combobox],[role=button],button,span,div')].filter(inBand);
   const nameOf=e=>norm(e.tagName==='SELECT'?e.selectedOptions[0]?.textContent:e.getAttribute('aria-valuetext')||e.value||e.innerText||e.title);
   const valid=s=>s&&s.length<=40&&!/备注|请选择|请输入|添加规格|本地上传|图库选择|删除|自定义排序/.test(s);

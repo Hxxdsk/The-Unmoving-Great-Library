@@ -101,8 +101,8 @@ def image_part(data):
     }
 
 
-def read_rows(page, label, client, cancel, log, cache=None):
-    snapshot = page.evaluate(SCRIPT, label)
+def read_rows(page, label, client, cancel, log, cache=None, snapshot=None):
+    snapshot = snapshot if snapshot is not None else page.evaluate(SCRIPT, label)
     rows = snapshot.get("rows", [])
     if not rows:
         log(
