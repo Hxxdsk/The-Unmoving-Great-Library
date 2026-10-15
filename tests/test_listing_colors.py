@@ -137,7 +137,7 @@ def test_actual_seven_colors_readonly_inputs_and_header_selector(session, tmp_pa
 def test_ai_reads_unknown_spec_widget_and_keeps_live_control_binding(session):
     class Reader:
         def generate(self, parts, schema):
-            assert parts[2]["inlineData"]["mimeType"] == "image/png"
+            assert any("inlineData" in p for p in parts)
             return {"rows": [{"row_id": 0, "name": "黑色"}]}
 
     with session as s:

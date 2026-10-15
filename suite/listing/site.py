@@ -28,6 +28,7 @@ class DouyinPage:
         )
         self.editor_url = ""
         self.details_prepared = False
+        self.spec_cache = {}
         self.client = client
         self.memory, self.guide = memory, guide
         self.pending = []
@@ -778,7 +779,9 @@ class DouyinPage:
             pass
         # Visible row geometry handles separate dropdown/note/icon wrappers,
         # selected values stored in inputs, and header-only legacy scopes.
-        region, layout = read_rows(self.page, label, None, self.cancel, self.log)
+        region, layout = read_rows(
+            self.page, label, None, self.cancel, self.log, self.spec_cache
+        )
         if (
             legacy
             and len(legacy) >= len(layout)
@@ -793,7 +796,7 @@ class DouyinPage:
             return region, layout
         if self.client is not None:
             region, layout = read_rows(
-                self.page, label, self.client, self.cancel, self.log
+                self.page, label, self.client, self.cancel, self.log, self.spec_cache
             )
             if layout:
                 return region, layout

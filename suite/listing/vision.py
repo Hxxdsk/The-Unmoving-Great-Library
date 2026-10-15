@@ -128,6 +128,7 @@ def analyze(client, product, colors, cancel, log=lambda _: None):
                 image_part(path, 1800),
             ]
         )
+    log(f"AI 识别 {len(photos)} 张颜色主图与尺码表，按网站的 {len(colors)} 个颜色配图")
     client.log = log
     result = client.generate(parts, schema)
     if not isinstance(result.get("colors"), list) or not isinstance(
@@ -186,4 +187,10 @@ def analyze(client, product, colors, cancel, log=lambda _: None):
             notes.append(f"{name} 未提供体重推荐，备注留空")
     if not sizes:
         raise ListingError("尺码表没有识别出尺码，未保存草稿。")
+    log(
+        "AI 尺码体重推荐："
+        + "；".join(
+            f'{row["name"]} → {row["weight"] or "无体重数据，留空"}' for row in sizes
+        )
+    )
     return Analysis(selected, sizes, notes)
