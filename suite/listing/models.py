@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 IMAGES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
-FOLDERS = ("800", "3.4", "水洗标", "详情", "白底", "尺码")
+FOLDERS = ("800", "3.4", "水洗标", "详情", "白底", "尺码", "颜色")
 
 
 class ListingError(RuntimeError):

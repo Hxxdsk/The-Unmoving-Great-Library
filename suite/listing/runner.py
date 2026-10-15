@@ -127,13 +127,16 @@ class BatchRunner:
                             sku_control = page.fill_sku(
                                 product.sku, require_same=bool(old.get("editor_url"))
                             )
-                            advance("替换3:4、白底与详情图片", 25)
+                            advance("替换3:4与白底图片", 25)
                             page.tab("图文信息")
                             page.replace_images(
                                 ("主图3:4", "主图3：4"), product.portrait
                             )
                             page.replace_images(("白底图",), product.images["白底"])
-                            page.replace_images(("商品详情",), product.images["详情"])
+                            if not page.details_prepared:
+                                page.replace_images(
+                                    ("商品详情",), product.images["详情"]
+                                )
                             advance("水洗标与货号", 40)
                             page.tab("属性信息")
                             page.replace_images(

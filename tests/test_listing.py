@@ -27,13 +27,13 @@ def short_fixture_waits(monkeypatch):
 
 
 def make_product(root, name="货号A"):
-    for folder in ("800", "3.4", "白底", "详情", "水洗标", "尺码"):
+    for folder in ("800", "3.4", "白底", "详情", "水洗标", "尺码", "颜色"):
         directory = root / name / folder
         directory.mkdir(parents=True)
         for number in (
             range(1, 8)
             if folder in ("800", "3.4")
-            else range(1, 3) if folder == "详情" else [1]
+            else range(1, 3) if folder in ("详情", "颜色") else [1]
         ):
             Image.new("RGB", (60, 80), "black" if number % 2 else "gray").save(
                 directory / f"{number}.png"
@@ -155,7 +155,7 @@ def test_vision_uses_only_valid_fronts_and_explicit_weights(tmp_path):
     product = make_product(tmp_path)
     client = Client()
     result = analyze(client, product, ["灰色", "黑色"], threading.Event())
-    assert result.colors["黑色"] == product.images["800"][1]
+    assert result.colors["黑色"] == product.images["颜色"][1]
     assert result.sizes[-1] == {"name": "3XL", "weight": "160-180斤"}
     assert normalize_size("XXXL") == "3XL"
     bad = client.generate([], {})

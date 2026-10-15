@@ -6,18 +6,28 @@
     if (!e.dataset.glId) e.dataset.glId = 'gl' + crypto.randomUUID().replaceAll('-','');
     return '[data-gl-id="' + e.dataset.glId + '"]';
   };
-  const photos = root => [...root.querySelectorAll('img')].filter(e => !e.closest('[role=tooltip],.ant-popover,[class*=assistantContent],[class*=AssistantContent]') && visible(e) && e.getBoundingClientRect().width >= 35 && !/data:image\/svg|\.svg(?:\?|$)/i.test(e.getAttribute('src') || ''));
-  const remove = root => [...root.querySelectorAll('button,[role=button],[class*=delete],[class*=Delete],[class*=remove],[data-icon=delete],.anticon-close-circle')]
-    .find(e => visible(e) && (/删除|移除|清空/.test(e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || '') || /delete|Delete|remove|close-circle/.test(e.className?.baseVal || e.className || '') || e.getAttribute('data-icon') === 'delete'));
+  const photos = root => {
+    const notes=[...root.querySelectorAll('input[placeholder*=备注]')];
+    const note=notes.length===1?notes[0]:null;
+    return [...root.querySelectorAll('img')].filter(e=>{
+      const r=e.getBoundingClientRect();
+      const smallSpec=note && r.x>=note.getBoundingClientRect().right-4;
+      return !e.closest('[role=tooltip],.ant-popover,[class*=assistantContent],[class*=AssistantContent]') && visible(e) && r.width>=(smallSpec?16:35) && !/data:image\/svg|\.svg(?:\?|$)/i.test(e.getAttribute('src')||'');
+    });
+  };
+  const remove = (root,photo=false) => [...root.querySelectorAll('button,[role=button],[class*=delete],[class*=Delete],[class*=remove],[data-icon=delete],.anticon-close-circle'+(photo?',[class*=close],[class*=Close],[data-icon*=close]':''))]
+    .find(e => visible(e) && (/删除|移除|清空/.test(e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || '') || /delete|Delete|remove|close-circle/.test(e.className?.baseVal || e.className || '') || e.getAttribute('data-icon') === 'delete' || photo && (/close/i.test(e.className?.baseVal || e.className || '') || /^[×✕]$/.test(e.innerText || ''))));
   if (op === 'section' || op === 'section_from') {
     const target = norm(label);
-    const anchors=new Set(['主图','主图3:4','白底图','商品详情','水洗标/吊牌图','水洗标/吊牌图片','货号','颜色分类','尺码大小','价格与库存','面料材质','填充物种类','品牌','重要属性','材质成分']);
+    const anchors=new Set(['主图','主图3:4','白底图','商品详情','水洗标/吊牌图','水洗标/吊牌图片','货号','颜色分类','尺码大小','价格与库存','面料材质','填充物种类','品牌','重要属性','材质成分','商品主图','商品标题']);
+    const specField=target==='颜色分类'||target==='尺码大小';
     const imageField=/^(主图|主图3:4|白底图|商品详情|水洗标\/吊牌图|水洗标\/吊牌图片)$/.test(target);
     const labels = op === 'section_from' ? [document.querySelector(selector)].filter(Boolean) : [...document.querySelectorAll('label,span,div,p,h1,h2,h3,h4')].filter(e => visible(e) && (norm(e.innerText) === target || [...e.childNodes].some(n=>n.nodeType===3 && norm(n.textContent)===target)))
       .sort((a,b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
     for (const leaf of labels) {
       for (let e=leaf.parentElement, depth=0; e && e !== document.body && depth < 9; e=e.parentElement, depth++) {
         if(anchors.has(target) && [...e.querySelectorAll('label,span,div,p')].some(n=>visible(n) && anchors.has(norm(n.innerText)) && norm(n.innerText)!==target))break;
+        if(specField&&!e.querySelector('input[placeholder*=备注],select,[role=combobox],[class*=select],[class*=Select]'))continue;
         if (e.querySelector(imageField ? 'input[type=file],[class*=upload],[class*=Upload],[data-icon=picture],.anticon-picture' : 'input,select,textarea,[role=combobox],table,[contenteditable=true],[class*=upload],[class*=Upload],[data-icon=picture],.anticon-picture') || photos(e).length ||
             [...e.querySelectorAll('button,[role=button],span,div')].some(b => /^(上传图片|上传主图|上传辅助图|图片|本地上传|清空)$/.test(b.innerText.trim()))) {
           if (e.getBoundingClientRect().height > 2000 && depth > 2) break;
@@ -92,11 +102,28 @@
       .sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
     return mark(candidates[0]);
   }
+  if(op==='spec_photo_trigger'){
+    const note=root.querySelector('input[placeholder*=备注]');
+    if(!note)return null;
+    const edge=note.getBoundingClientRect().right;
+    const deletion=remove(root);
+    const candidates=[...root.querySelectorAll('[data-icon=picture],[data-icon=image],[class*=upload],[class*=Upload],[aria-label*=图],[title*=图],svg,[role=img]')]
+      .filter(e=>{const r=e.getBoundingClientRect();return visible(e)&&r.width>=8&&r.height>=8&&r.x>=edge-4&&r.x<edge+110&&!(deletion&&(deletion.contains(e)||e.contains(deletion)))&&!/delete|remove|trash/i.test([e.className?.baseVal||e.className,e.getAttribute('data-icon'),e.getAttribute('aria-label')].join(' '));})
+      .sort((a,b)=>a.getBoundingClientRect().x-b.getBoundingClientRect().x);
+    let target=candidates[0];
+    if(!target)return null;
+    for(let e=target.parentElement;e&&e!==root;e=e.parentElement){
+      const r=e.getBoundingClientRect();
+      if(r.x<edge-4||r.width>80||r.height>80||e.contains(note)||e.contains(deletion))break;
+      target=e;
+    }
+    return mark(target);
+  }
   if (op === 'remove_photo') {
     const image=photos(root)[0];
     for(let box=image?.parentElement;box && box!==root;box=box.parentElement){
       if(box.querySelector('select,[role=combobox],input[placeholder*=备注]'))break;
-      const control=remove(box);
+      const control=remove(box,true);
       if(control)return mark(control);
     }
     return null;
@@ -108,14 +135,15 @@
       let row=note.parentElement;
       for (let i=0; row && i<6; row=row.parentElement,i++) {
         if (row.querySelectorAll('input[placeholder*=备注]').length !== 1) break;
-        const control=row.querySelector('select,[role=combobox],.ant-select');
+        const control=row.querySelector('select,[role=combobox],[class*=select],[class*=Select]');
         if (!control) continue;
-        const selected=row.querySelector('.ant-select-selection-item,[class*=selection-item],select');
+        const selected=row.querySelector('select,[class*=selection-item],[class*=selectionItem],[class*=selection-text],[class*=SelectionText],[class*=selected-value],[class*=selectedValue]');
         let value=selected?.tagName === 'SELECT' ? selected.selectedOptions[0]?.textContent : selected?.innerText;
-        if (!value && control.tagName === 'INPUT') value=control.value;
+        if (!value) value=control.getAttribute('aria-valuetext') || (control.tagName === 'INPUT' ? control.value : control.innerText);
+        if (!value) value=[...control.querySelectorAll('span,div')].filter(visible).map(e=>e.innerText.trim()).find(v=>v&&!/请选择|请输入/.test(v));
         if (!value) value=[...row.querySelectorAll('input')].find(e=> e !== note && !['file','hidden'].includes(e.type))?.value;
         value=String(value||'').replace(/×\s*$/,'').trim();
-        if (value) result.push({name:value, row:mark(row), control:mark(control), note:mark(note), remove:mark(remove(row)), photos:photos(row).length});
+        if (value && !/^(请选择|请输入)/.test(value)) result.push({name:value, row:mark(row), control:mark(control), note:mark(note), remove:mark(remove(row)), photos:photos(row).length});
         break;
       }
     }

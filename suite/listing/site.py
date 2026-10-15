@@ -26,6 +26,7 @@ class DouyinPage:
             log,
         )
         self.editor_url = ""
+        self.details_prepared = False
         self.client = client
         self.memory, self.guide = memory, guide
         self.pending = []
@@ -137,7 +138,7 @@ class DouyinPage:
 
     def ai_context(self, goal):
         return {
-            "完整流程": "进入单商品创建页 → 本地上传800主图前5张 → 网站推荐标题第一个 → 继续生成编辑页 → 替换3:4、白底、详情、水洗标 → 填当前货号 → 48小时发货 → 颜色正面图、尺码和体重 → 价格399、目标现货库存1000 → 校验 → 仅保存草稿",
+            "完整流程": "进入单商品创建页 → 本地上传800主图前5张 → 生成前先清空商品详情并上传详情文件夹 → 网站推荐标题第一个 → 继续生成编辑页 → 替换3:4、白底、水洗标 → 填当前货号 → 48小时发货 → 按网站颜色从颜色文件夹选图上传到右侧图片框、尺码和体重 → 价格399、目标现货库存1000 → 校验 → 仅保存草稿",
             "当前阶段": self.phase,
             "本次目的": goal,
             "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
@@ -289,7 +290,7 @@ class DouyinPage:
             "当前图片字段被浮层遮挡，请收起辅助浮窗后重试；未强制点击或删除其他字段。"
         )
 
-    def upload(self, selector, paths):
+    def upload(self, selector, paths, trigger=None):
         paths = [str(Path(path).resolve()) for path in paths]
         if not paths:
             raise ListingError("待上传图片为空。")
@@ -315,8 +316,12 @@ class DouyinPage:
                 )
         else:
             scope = self.page.locator(selector)
-            target = self.visible_control(
-                re.compile(r"^(上传图片|上传主图|上传辅助图|图片|本地上传)$"), scope
+            target = (
+                trigger
+                if trigger is not None
+                else self.visible_control(
+                    re.compile(r"^(上传图片|上传主图|上传辅助图|图片|本地上传)$"), scope
+                )
             )
             if target is None:
                 trigger = self.dom("upload_trigger", selector=selector)
@@ -728,6 +733,14 @@ class DouyinPage:
                 )
             state = self.creation_state()
             if state == "titles":
+                self.phase = "生成前清空默认商品详情，上传本款详情图供网站识别颜色"
+                self.replace_images(("商品详情",), product.images["详情"])
+                self.details_prepared = True
+                self.wait(
+                    lambda: not self.dom("busy") and bool(self.dom("recommendations")),
+                    "详情上传后尚未生成可用的推荐标题",
+                    timeout=90,
+                )
                 recommendation = self.dom("recommendations")[0]
                 self.page.locator(recommendation["selector"]).click()
                 self.phase = "已选择网站第一个推荐标题，需要继续生成商品编辑页"
@@ -800,11 +813,23 @@ class DouyinPage:
             if not record:
                 raise ListingError(f"页面颜色 {color} 已变化，停止当前货号。")
             self.clear(record["row"])
-            self.upload(record["row"], [path])
+            trigger = None
+            if not self.dom("file_inputs", selector=record["row"]):
+                photo = self.dom("spec_photo_trigger", selector=record["row"])
+                trigger = (
+                    self.page.locator(photo)
+                    if photo
+                    else self.control(
+                        f"定位颜色 {color} 这一行备注右侧的图片框，悬停后选择本地上传；不要选颜色下拉框或删除按钮",
+                        self.page.locator(record["row"]),
+                    )
+                )
+            self.upload(record["row"], [path], trigger=trigger)
 
     def set_sizes(self, sizes):
         desired = {normalize_size(row["name"]): row["weight"] for row in sizes}
-        selector, records = self.specs("尺码大小")
+        selector = self.section("尺码大小")
+        records = self.dom("specs", selector=selector) or []
         for record in records:
             if normalize_size(record["name"]) not in desired:
                 if not record["remove"]:
