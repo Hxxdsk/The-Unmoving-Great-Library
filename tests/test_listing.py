@@ -300,3 +300,109 @@ def test_listing_interface_has_expected_defaults(tmp_path):
     window.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
+
+
+def test_visible_edge_reconnect_keeps_profile_window_and_other_tabs(tmp_path):
+    """Exercise native launch -> worker disconnect -> another worker reconnect."""
+    import os
+    from suite.listing.browser import EdgeSession, profile_endpoint
+
+    executable = shutil.which("chromium")
+    if os.name == "nt" or not executable or not os.environ.get("DISPLAY"):
+        pytest.skip("本检查需要 Linux Chromium 和可见 X11 显示服务")
+    profile = tmp_path / "existing-edge-data"
+    (profile / "Default").mkdir(parents=True)
+    wrapper = tmp_path / "browser"
+    wrapper.write_text(
+        '#!/bin/sh\nexec "'
+        + executable
+        + '" --no-sandbox --disable-background-networking "$@"\n'
+    )
+    wrapper.chmod(0o700)
+    config = BrowserConfig(str(profile), "Default", str(wrapper))
+    results, errors = [], []
+
+    def job(first):
+        try:
+            with EdgeSession(config, threading.Event()) as session:
+                cdp = session.browser.new_browser_cdp_session()
+                arguments = cdp.send("Browser.getBrowserCommandLine")["arguments"]
+                cdp.detach()
+                assert not any(
+                    "--headless" in a or "--incognito" in a for a in arguments
+                )
+                assert "--profile-directory=Default" in arguments
+                page = session.page
+                page.route(
+                    "**/*",
+                    lambda route: route.fulfill(
+                        content_type="text/html; charset=utf-8",
+                        body="<button>新建商品</button>",
+                    ),
+                )
+                if first:
+                    session.context.add_cookies(
+                        [
+                            {
+                                "name": "fixture-login",
+                                "value": "existing-login",
+                                "domain": "fxg.jinritemai.com",
+                                "path": "/",
+                                "secure": True,
+                            }
+                        ]
+                    )
+                    other = session.context.new_page()
+                    other.goto("about:blank#ordinary-user-tab")
+                    assert "已复用" in session.open_login()
+                else:
+                    assert any(
+                        c["name"] == "fixture-login" for c in session.context.cookies()
+                    )
+                    assert any(
+                        p.url.endswith("#ordinary-user-tab")
+                        for p in session.context.pages
+                    )
+                    assert session.page.url.startswith("https://fxg.jinritemai.com/")
+                    assert "已复用" in session.check_login()
+                assert session.new_work_page() is page
+                target = session.context.new_cdp_session(page)
+                target_id = target.send("Target.getTargetInfo")["targetInfo"][
+                    "targetId"
+                ]
+                target.detach()
+                results.append(
+                    (session.endpoint, target_id, len(session.context.pages))
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    try:
+        for first in (True, False):
+            worker = threading.Thread(target=job, args=(first,))
+            worker.start()
+            worker.join(50)
+            assert not worker.is_alive(), "浏览器工作线程未按时返回"
+            if errors:
+                raise errors[0]
+            assert profile_endpoint(profile), "工作线程退出后浏览器应继续运行"
+        assert results[0] == results[1], "两个工作线程应复用同一浏览器、操作标签和资料"
+    finally:
+        endpoint = profile_endpoint(profile)
+        if endpoint:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.connect_over_cdp(endpoint)
+                connection = browser.new_browser_cdp_session()
+                connection.send("Browser.close")
+
+
+def test_edge_rejects_invalid_profile_without_launching(tmp_path):
+    from suite.listing.browser import EdgeSession
+
+    session = EdgeSession(BrowserConfig(str(tmp_path), "../Default"), threading.Event())
+    with patch("suite.listing.browser.subprocess.Popen") as launch:
+        with pytest.raises(ListingError, match="配置名称无效"):
+            session._open_profile()
+        launch.assert_not_called()

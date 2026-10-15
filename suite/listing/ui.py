@@ -99,7 +99,7 @@ class ListingWindow(QMainWindow):
         title = QVBoxLayout()
         title.addWidget(label("抖店批量上架", "title"))
         title.addWidget(
-            label("选择目录 → 复用 Edge 登录 → 逐货号填写 → 保存草稿", "hint")
+            label("选择目录 → 打开 Edge 操作窗口 → 逐货号填写 → 保存草稿", "hint")
         )
         heading.addLayout(title)
         heading.addStretch()
@@ -125,7 +125,7 @@ class ListingWindow(QMainWindow):
         self.profile.setMinimumWidth(160)
         self.profile_choose = QPushButton("资料目录")
         self.profile_choose.clicked.connect(self.choose_profile_path)
-        self.login = QPushButton("检查登录")
+        self.login = QPushButton("打开 Edge / 检查登录")
         self.login.clicked.connect(self.check_login)
         grid.addWidget(QLabel("Edge 资料"), 1, 0)
         grid.addWidget(self.user_data, 1, 1, 1, 2)
@@ -155,7 +155,9 @@ class ListingWindow(QMainWindow):
         content.addLayout(options)
         self.advanced = QGroupBox("可选：连接已启用调试的 Edge / 指定浏览器程序")
         self.advanced.setCheckable(True)
-        self.advanced.setChecked(False)
+        self.advanced.setChecked(
+            bool(self.preferences.get("endpoint") or self.preferences.get("executable"))
+        )
         advanced = QHBoxLayout(self.advanced)
         self.endpoint = QLineEdit(self.preferences.get("endpoint", ""))
         self.endpoint.setPlaceholderText(
@@ -168,7 +170,7 @@ class ListingWindow(QMainWindow):
         content.addWidget(self.advanced)
         content.addWidget(
             label(
-                "默认复用已有 Edge 资料在后台运行；开始前请完全退出 Edge。API / 模型在工具箱主页配置。",
+                "使用可见的 Edge 操作窗口，保留登录与窗口供下次复用；操作期间请勿手动切换页面。API / 模型在工具箱主页配置。",
                 "hint",
             )
         )
@@ -392,10 +394,12 @@ class ListingWindow(QMainWindow):
         if self.check_job:
             return
         config = self.browser_config()
+        self.save_preferences()
+        self.log.appendPlainText("正在打开或连接 Edge 操作窗口，复用所选资料…")
 
         def run(cancel, *_):
             with EdgeSession(config, cancel) as session:
-                return session.check_login()
+                return session.open_login()
 
         self.check_job = Job(run, self)
         self.check_job.result.connect(self.log.appendPlainText)
