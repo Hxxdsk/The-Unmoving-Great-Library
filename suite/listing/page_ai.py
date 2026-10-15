@@ -32,8 +32,9 @@ SCHEMA = {
 
 
 class PageAI:
-    def __init__(self, page, client, cancel, log=lambda _: None):
+    def __init__(self, page, client, cancel, log=lambda _: None, trace=None):
         self.page, self.client, self.cancel, self.log = page, client, cancel, log
+        self.trace = trace
 
     def check(self):
         if self.cancel.is_set():
@@ -139,7 +140,10 @@ class PageAI:
             ):
                 raise ListingError(f"AI 暂未定位到「{goal}」，请检查工作页状态。")
             if action in ("scroll_down", "scroll_up"):
-                self.page.mouse.wheel(0, 600 if action == "scroll_down" else -600)
+                dy = 600 if action == "scroll_down" else -600
+                if self.trace is not None:
+                    self.trace.append({"kind": "scroll", "dy": dy})
+                self.page.mouse.wheel(0, dy)
                 self.page.wait_for_timeout(200)
                 history.append(action)
                 continue
@@ -169,6 +173,12 @@ class PageAI:
                 history.append("控件位置或遮挡变化，重新观察")
                 continue
             if action == "hover":
+                if self.trace is not None:
+                    from .workflow import DESCRIBE
+
+                    self.trace.append(
+                        {"kind": "hover", "target": target.evaluate(DESCRIBE)}
+                    )
                 target.hover(timeout=5000)
                 self.page.wait_for_timeout(250)
                 history.append("已悬停候选 " + item["id"])

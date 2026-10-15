@@ -52,8 +52,11 @@ class BatchRunner:
         report=lambda *args: None,
         log=lambda _: None,
         session_factory=EdgeSession,
+        memory=None,
+        guide=None,
     ):
         self.root, self.products, self.browser = Path(root), products, browser
+        self.memory, self.guide = memory, guide
         self.client, self.cancel = client, cancel
         self.price, self.inventory = price, inventory
         self.report, self.log, self.session_factory = report, log, session_factory
@@ -85,10 +88,13 @@ class BatchRunner:
                         self.cancel,
                         lambda text: self.log(f"[{product.sku}] {text}"),
                         client=self.client,
+                        memory=self.memory,
+                        guide=self.guide,
                     )
 
                     def advance(name, percent):
                         nonlocal stage
+                        page.confirm_memory()
                         stage = name
                         journal.update(
                             product,

@@ -10,12 +10,15 @@ from .models import ListingError, Cancelled, SaveUncertain
 from .browser import ENTRY_URL
 from .vision import normalize_size
 from .page_ai import PageAI, FORBIDDEN
+from .workflow import DESCRIBE, page_key, scope_key, replay, safe_target
 
 DOM = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
 
 
 class DouyinPage:
-    def __init__(self, session, cancel, log=lambda _: None, client=None):
+    def __init__(
+        self, session, cancel, log=lambda _: None, client=None, memory=None, guide=None
+    ):
         self.session, self.page, self.cancel, self.log = (
             session,
             session.page,
@@ -24,6 +27,10 @@ class DouyinPage:
         )
         self.editor_url = ""
         self.client = client
+        self.memory, self.guide = memory, guide
+        self.pending = []
+        self.last_plan = None
+        self.popups = []
 
     def check(self):
         if self.cancel.is_set():
@@ -49,6 +56,7 @@ class DouyinPage:
         while time.monotonic() < deadline:
             self.check()
             if condition():
+                self.confirm_memory()
                 return
             if self.cancel.wait(0.25):
                 self.check()
@@ -73,15 +81,107 @@ class DouyinPage:
                 return visible[0]
         return None
 
-    def control(self, text, root=None):
+    def memory_failed(self, recipe):
+        if self.memory:
+            try:
+                self.memory.failed(recipe)
+            except Exception as exc:
+                self.log("流程记忆暂不可写，本次继续运行：" + str(exc))
+                self.memory = None
+
+    def confirm_memory(self):
+        for plan in self.pending:
+            if self.memory:
+                try:
+                    self.memory.remember(
+                        **{k: v for k, v in plan.items() if not k.startswith("_")},
+                        outcome=page_key(self.page),
+                    )
+                except Exception as exc:
+                    self.log("流程记忆暂不可写，本次继续运行：" + str(exc))
+                    self.memory = None
+        self.pending.clear()
+
+    def discard_pending(self):
+        if self.memory:
+            for plan in self.pending:
+                if plan.get("_recipe"):
+                    self.memory_failed(plan["_recipe"])
+        self.pending.clear()
+
+    def memorized(self, goal, root=None, allow_save=False):
+        if not self.memory:
+            return None
+        for recipe in self.memory.recipes(goal, page_key(self.page), scope_key(root)):
+            if recipe.get("failures", 0) >= 3:
+                continue
+            try:
+                target = replay(
+                    self.page, recipe["actions"], root, allow_save, self.cancel
+                )
+                if target is not None and target is not True:
+                    self.log("优先使用流程记忆：" + goal)
+                    return (
+                        target,
+                        list(recipe["actions"]),
+                        recipe.get("source", "记忆"),
+                        recipe,
+                    )
+            except Cancelled:
+                raise
+            except Exception:
+                pass
+            self.memory_failed(recipe)
+        return None
+
+    def control(self, text, root=None, allow_save=False):
         self.check()
-        target = self.visible_control(text, root)
-        if target is None:
-            goal = text if isinstance(text, str) else text.pattern
-            target = PageAI(self.page, self.client, self.cancel, self.log).find(
-                goal, root
-            )
+        goal = text if isinstance(text, str) else text.pattern
+        before, scope = page_key(self.page), scope_key(root)
+        recalled = self.memorized(goal, root, allow_save)
+        source, actions, recipe = "程序", [], None
+        if recalled:
+            target, actions, source, recipe = recalled
+        else:
+            target = self.visible_control(text, root)
+            if target is None:
+                source = "AI"
+                try:
+                    target = PageAI(
+                        self.page, self.client, self.cancel, self.log, trace=actions
+                    ).find(goal, root, allow_save)
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    if not self.guide:
+                        raise
+                    self.log(f"自动定位未完成，转交用户指导：{goal}（{exc}）")
+                    target, actions = self.guide.run(
+                        self.page, goal, root=root, allow_save=allow_save
+                    )
+                    source = "用户指导"
+            if not actions or actions[-1]["kind"] != "target":
+                actions.append({"kind": "target", "target": target.evaluate(DESCRIBE)})
+        # Memory locates the final element, but does not click it twice.
+        self.last_plan = dict(
+            goal=goal,
+            page=before,
+            scope=scope,
+            source=source,
+            actions=actions,
+            _recipe=recipe,
+        )
         return target
+
+    def record_action(self, target, kind="click"):
+        if not self.last_plan:
+            return
+        plan = dict(self.last_plan)
+        # Recipes locate the target after any preceding hover/scroll actions.
+        plan["actions"] = [dict(a) for a in plan["actions"]]
+        if plan["actions"] and plan["actions"][-1]["kind"] == "target":
+            self.pending.append(plan)
+        self.last_plan = None
 
     def click(self, text, root=None):
         self.check()
@@ -94,7 +194,8 @@ class DouyinPage:
         )
         if FORBIDDEN.search(re.sub(r"\s+", "", actual)):
             raise ListingError("工具只保存草稿，禁止点击发布。")
-        target.click(timeout=12000)
+        self.record_action(target)
+        target.click(timeout=8000)
 
     def tab(self, text):
         self.click(text)
@@ -104,9 +205,12 @@ class DouyinPage:
         if self.visible_control("单商品") is not None:
             return
         trigger = self.control("新建商品")
-        trigger.hover(timeout=10000)
+        self.record_action(trigger, "hover")
+        trigger.hover(timeout=6000)
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
+            if self.creation_state() in ("upload", "titles", "editor"):
+                return
             self.check()
             if self.visible_control("单商品") is not None:
                 return
@@ -115,6 +219,7 @@ class DouyinPage:
         # Also support versions whose menu opens by clicking the trigger.
         trigger.click(timeout=5000)
         self.page.wait_for_timeout(250)
+        self.creation_state()
 
     def section(self, *names):
         for name in names:
@@ -122,8 +227,8 @@ class DouyinPage:
             if selector:
                 self.page.locator(selector).scroll_into_view_if_needed()
                 return selector
-        if self.client is not None:
-            target = PageAI(self.page, self.client, self.cancel, self.log).find(
+        if self.client is not None or self.guide:
+            target = self.control(
                 "定位字段标题：" + "/".join(names) + "，不要选择其他字段或实际上传按钮"
             )
             leaf = target.evaluate(
@@ -131,6 +236,7 @@ class DouyinPage:
             )
             selector = self.dom("section_from", names[0], leaf)
             if selector:
+                self.record_action(target)
                 self.page.locator(selector).scroll_into_view_if_needed()
                 return selector
         raise ListingError("页面未识别到字段：" + "/".join(names))
@@ -172,10 +278,11 @@ class DouyinPage:
                 target = (
                     self.page.locator(trigger)
                     if trigger
-                    else PageAI(self.page, self.client, self.cancel, self.log).find(
+                    else self.control(
                         "定位此字段的上传图片入口，可悬停展开本地上传菜单", scope
                     )
                 )
+            self.record_action(target, "hover")
             target.hover()
             local = self.page.get_by_text("本地上传", exact=True)
             if local.count() and local.last.is_visible():
@@ -229,12 +336,13 @@ class DouyinPage:
                 if button.count() == 1 and button.is_visible():
                     button.click()
                     return
-            if self.client is not None:
-                target = PageAI(self.page, self.client, self.cancel, self.log).find(
+            if self.client is not None or self.guide:
+                target = self.control(
                     "在当前弹窗确认这一步操作，定位含义相同的按钮：" + "/".join(names),
                     dialog,
                     allow_save="保存草稿" in names,
                 )
+                self.record_action(target)
                 target.click(timeout=10000)
                 return
 
@@ -245,60 +353,157 @@ class DouyinPage:
         if self.photo_count(selector) != len(paths):
             raise ListingError("字段图片数量与当前货号资料不符。")
 
+    def creation_state(self):
+        # A navigation can advance directly, or open a new tool-owned tab.
+        for candidate in list(self.popups):
+            if (
+                not candidate.is_closed()
+                and "fxg.jinritemai.com" == urlparse(candidate.url).hostname
+            ):
+                self.page = self.session.page = candidate
+                if hasattr(self.session, "own_page"):
+                    self.session.own_page(candidate)
+        if self.page.is_closed():
+            return "unknown"
+        if urlparse(self.page.url).hostname != "fxg.jinritemai.com":
+            return "loading"
+        if self.dom("section", "主图3:4") or self.dom("section", "主图3：4"):
+            self.editor_url = self.page.url
+            return "editor"
+        if self.dom("recommendations"):
+            return "titles"
+        if self.visible_control("本地上传") is not None:
+            return "upload"
+        if self.visible_control("单商品") is not None:
+            return "menu"
+        if any(
+            not p.is_closed() and p.url == "about:blank" for p in self.popups
+        ) or re.search(
+            r"/(?:create|publish|add|edit)(?:/|$)", urlparse(self.page.url).path
+        ):
+            return "loading"
+        return "list"
+
+    def navigation_wait(self, condition, message, timeout=30):
+        # Reuse the proven recovery path before waiting for a failed fixed step.
+        key, before = "流程：" + message, page_key(self.page)
+        if not condition() and self.memory:
+            for recipe in self.memory.recipes(key, before):
+                if recipe.get("failures", 0) >= 3:
+                    continue
+                try:
+                    replay(
+                        self.page,
+                        recipe["actions"],
+                        cancel=self.cancel,
+                        observe=lambda: (self.creation_state(), self.page)[1],
+                    )
+                    self.wait(condition, message, timeout=3)
+                    self.log("已按记忆恢复流程：" + message)
+                    return
+                except Cancelled:
+                    raise
+                except Exception:
+                    self.memory_failed(recipe)
+        try:
+            self.wait(condition, message, timeout)
+        except Cancelled:
+            raise
+        except ListingError:
+            if not self.guide:
+                raise
+            self.discard_pending()
+            self.log("等待用户在工作页完成：" + message)
+            _, actions = self.guide.run(
+                self.page,
+                message,
+                mode="record",
+                condition=condition,
+                observe=lambda: (self.creation_state(), self.page)[1],
+            )
+            if self.memory and actions:
+                try:
+                    self.memory.remember(
+                        key,
+                        before,
+                        actions,
+                        source="用户指导",
+                        outcome=page_key(self.page),
+                    )
+                except Exception as exc:
+                    self.log("流程记忆暂不可写，本次继续运行：" + str(exc))
+                    self.memory = None
+            self.confirm_memory()
+
     def create(self, product):
         self.session.goto(ENTRY_URL)
-        popups = []
+        self.popups = []
+        source = self.page
 
         def capture(page):
-            popups.append(page)
+            self.popups.append(page)
 
-        source = self.page
         source.on("popup", capture)
+        uploaded = False
         try:
-            self.open_create_menu()
-            self.click("单商品")
-            self.wait(
-                lambda: bool(popups)
-                or self.page.get_by_text("本地上传", exact=True).count() > 0,
-                "新建商品页面未打开",
-                timeout=30,
+            ready = lambda: self.creation_state() in ("upload", "titles", "editor")
+            if self.memory and self.memory.recipes(
+                "流程：打开单商品创建页", page_key(self.page)
+            ):
+                self.navigation_wait(ready, "打开单商品创建页", timeout=3)
+            else:
+                self.open_create_menu()
+                state = self.creation_state()
+                if (
+                    state not in ("upload", "titles", "editor", "loading")
+                    and not self.popups
+                ):
+                    self.click("单商品")
+            self.navigation_wait(
+                lambda: self.creation_state() in ("upload", "titles", "editor"),
+                "打开单商品创建页",
+                timeout=20,
             )
+            state = self.creation_state()
+            if state == "upload":
+                local = self.control("本地上传")
+                with self.page.expect_file_chooser(timeout=15000) as chooser:
+                    self.record_action(local)
+                    local.click(timeout=8000)
+                chooser.value.set_files([str(path) for path in product.main])
+                uploaded = True
+                self.wait(
+                    lambda: not self.dom("busy")
+                    and self.visible_control(re.compile("下一步")) is not None
+                    and self.visible_control(re.compile("下一步")).is_enabled(),
+                    "商品主图上传未完成",
+                    timeout=90,
+                )
+                self.click(re.compile(r"^下一步.*"))
+                self.navigation_wait(
+                    lambda: self.creation_state() in ("titles", "editor"),
+                    "等待网站生成标题或编辑页",
+                    timeout=180,
+                )
+            state = self.creation_state()
+            if state == "titles":
+                recommendation = self.dom("recommendations")[0]
+                self.page.locator(recommendation["selector"]).click()
+                self.click(re.compile(r"^确认信息.*继续生成$|^继续生成$"))
+                self.navigation_wait(
+                    lambda: self.creation_state() == "editor",
+                    "进入商品编辑页",
+                    timeout=180,
+                )
+            if self.creation_state() != "editor":
+                raise ListingError("创建流程尚未到达商品编辑页")
+            self.editor_url = self.page.url
+            if not uploaded:
+                self.tab("图文信息")
+                self.replace_images(("主图",), product.main)
+            self.confirm_memory()
         finally:
             source.remove_listener("popup", capture)
-        if popups:
-            if len(popups) != 1:
-                raise ListingError("新建商品打开多个页面，无法确认当前货号页面。")
-            self.page = self.session.page = popups[0]
-            if hasattr(self.session, "own_page"):
-                self.session.own_page(self.page)
-        local = self.control("本地上传")
-        local.wait_for(state="visible", timeout=20000)
-        with self.page.expect_file_chooser() as chooser:
-            local.click()
-        chooser.value.set_files([str(path) for path in product.main])
-        self.wait(
-            lambda: not self.dom("busy")
-            and self.page.get_by_role(
-                "button", name=re.compile("下一步")
-            ).first.is_enabled(),
-            "商品主图上传未完成",
-            timeout=90,
-        )
-        self.click(re.compile(r"^下一步.*"))
-        self.wait(
-            lambda: bool(self.dom("recommendations")),
-            "网站没有返回可选择的 AI 推荐标题",
-            timeout=180,
-        )
-        recommendation = self.dom("recommendations")[0]
-        self.page.locator(recommendation["selector"]).click()
-        self.click(re.compile(r"^确认信息.*继续生成$|^继续生成$"))
-        self.wait(
-            lambda: bool(self.dom("section", "主图3:4")),
-            "网站尚未生成商品编辑页",
-            timeout=180,
-        )
-        self.editor_url = self.page.url
 
     def resume(self, url):
         self.session.goto(url)
@@ -319,7 +524,13 @@ class DouyinPage:
         selector = self.section("货号")
         control = self.dom("input", selector=selector)
         if not control:
-            raise ListingError("货号输入框不唯一，停止以免串款。")
+            target = self.control("定位货号输入框", self.page.locator(selector))
+            if not target.is_editable():
+                raise ListingError("所选位置不是可编辑的货号输入框")
+            control = target.evaluate(
+                "e=>{if(!e.dataset.glId)e.dataset.glId='gl'+crypto.randomUUID().replaceAll('-','');return '[data-gl-id=\"'+e.dataset.glId+'\"]'}"
+            )
+            self.record_action(target)
         if require_same and self.page.locator(control).input_value() not in ("", sku):
             raise ListingError("恢复页面已有不同货号，禁止覆盖，请核对任务记录。")
         self.page.locator(control).fill(sku)
@@ -375,7 +586,8 @@ class DouyinPage:
             else:
                 entry = entry.first
             if not entry.count():
-                raise ListingError("未找到新增尺码选择框。")
+                entry = self.control("定位新增尺码的选择框", scope)
+                self.record_action(entry)
             if entry.evaluate("(e)=>e.tagName") == "SELECT":
                 choices = entry.locator("option").evaluate_all(
                     "(options)=>options.map(e=>({value:e.value,label:e.textContent}))"
@@ -399,8 +611,11 @@ class DouyinPage:
                 if option.is_visible() and normalize_size(option.inner_text()) == name:
                     matches.append(option)
             if len(matches) != 1:
-                raise ListingError(f"未找到唯一可选尺码 {name}，未自造规格。")
-            matches[0].click()
+                option = self.control("选择尺码选项：" + name)
+                self.record_action(option)
+                option.click()
+            else:
+                matches[0].click()
             self.page.keyboard.press("Escape")
         _, records = self.specs("尺码大小")
         if {normalize_size(row["name"]) for row in records} != set(desired):
@@ -569,17 +784,13 @@ class DouyinPage:
 
     def save_draft(self):
         self.check()
-        button = self.visible_control("保存草稿")
-        if button is None:
-            button = PageAI(self.page, self.client, self.cancel, self.log).find(
-                "保存草稿",
-                allow_save=True,
-            )
+        button = self.control("保存草稿", allow_save=True)
         success = re.compile("草稿保存成功|保存成功|已保存至草稿箱|已保存到草稿箱")
         existing = self.page.get_by_text(success)
         if any(existing.nth(i).is_visible() for i in range(existing.count())):
             raise ListingError("页面残留旧的保存回执，请重新打开当前任务后重试。")
         try:
+            self.record_action(button)
             button.click()
             self.confirm_modal(("保存草稿", "保存", "确定"))
             self.wait(
