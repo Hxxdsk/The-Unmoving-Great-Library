@@ -93,3 +93,63 @@ def test_six_real_style_color_rows_upload_through_right_picture_boxes(
                 == f"color-{i}.png"
             )
         assert not s.page.evaluate("window.deleted===true")
+
+
+def test_actual_seven_colors_readonly_inputs_and_header_selector(session, tmp_path):
+    colors = ["黑色", "月光蓝", "浅绿", "卡其", "粉紫", "深灰", "天池蓝"]
+    sizes = ["S", "M", "L", "XL", "2XL", "3XL"]
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            """<style>.line{display:flex;align-items:center;gap:6px;width:300px;height:42px}.line input:first-child{width:120px}.line input[placeholder]{width:88px}.pic{width:28px;height:28px}.pic svg,.pic img{width:28px;height:28px}</style>
+        <section id="colors"><header><label>颜色分类</label><select><option>颜色分类</option></select></header><div id="color-items"></div></section>
+        <section id="sizes"><header><label>尺码大小</label></header><div id="size-items"></div></section><label>尺码表</label>"""
+        )
+        s.page.evaluate(
+            """({colors,sizes})=>{
+          for(const [root,names] of [['color-items',colors],['size-items',sizes]]){
+            document.getElementById(root).innerHTML=names.map((n,i)=>`<div class="line"><input readonly value="${n}"><input placeholder="备注">${root==='color-items'?`<div class="pic"><svg data-icon="picture"><rect width="25" height="25"/></svg><input type="file" style="display:none"></div>`:''}<button aria-label="删除">删除</button></div>`).join('');
+          }
+          for(const input of document.querySelectorAll('input[type=file]'))input.onchange=e=>{const img=document.createElement('img');img.src=URL.createObjectURL(e.target.files[0]);img.dataset.name=e.target.files[0].name;input.parentElement.querySelector('svg').remove();input.parentElement.append(img)};
+        }""",
+            {"colors": colors, "sizes": sizes},
+        )
+        page = DouyinPage(s, threading.Event())
+        _, rows = page.specs("颜色分类")
+        assert [r["name"] for r in rows] == colors
+        _, size_rows = page.specs("尺码大小")
+        assert [r["name"] for r in size_rows] == sizes
+        paths = {}
+        for i, color in enumerate(colors):
+            paths[color] = tmp_path / f"{i}.png"
+            Image.new("RGB", (60, 60), "black").save(paths[color])
+        page.set_color_photos(Analysis(paths, [], []))
+        _, rows = page.specs("颜色分类")
+        assert all(r["photos"] == 1 for r in rows)
+        for i, row in enumerate(rows):
+            assert (
+                s.page.locator(row["photo"]).locator("img").get_attribute("data-name")
+                == f"{i}.png"
+            )
+        assert all(s.page.locator(row["note"]).input_value() == "" for row in size_rows)
+
+
+def test_ai_reads_unknown_spec_widget_and_keeps_live_control_binding(session):
+    class Reader:
+        def generate(self, parts, schema):
+            assert parts[2]["inlineData"]["mimeType"] == "image/png"
+            return {"rows": [{"row_id": 0, "name": "黑色"}]}
+
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            """<section><label>颜色分类</label><div style="display:flex;gap:5px;align-items:center"><div style="width:120px;height:32px"><canvas width="120" height="32"></canvas></div><input placeholder="备注" style="width:88px;height:26px"><div style="width:28px;height:28px"><svg width="25" height="25"><rect width="20" height="20"/></svg></div></div></section><label>尺码大小</label>"""
+        )
+        s.page.evaluate(
+            "()=>{const c=document.querySelector('canvas').getContext('2d');c.font='18px sans-serif';c.fillText('黑色',10,22)}"
+        )
+        page = DouyinPage(s, threading.Event(), client=Reader())
+        _, rows = page.specs("颜色分类")
+        assert [r["name"] for r in rows] == ["黑色"]
+        assert s.page.locator(rows[0]["note"]).get_attribute("placeholder") == "备注"
+        assert s.page.locator(rows[0]["photo"]).count() == 1

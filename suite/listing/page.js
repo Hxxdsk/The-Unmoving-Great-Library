@@ -11,7 +11,7 @@
     const note=notes.length===1?notes[0]:null;
     return [...root.querySelectorAll('img')].filter(e=>{
       const r=e.getBoundingClientRect();
-      const smallSpec=note && r.x>=note.getBoundingClientRect().right-4;
+      const smallSpec=root.dataset.glSpecPhoto==='true'||note && r.x>=note.getBoundingClientRect().right-4;
       return !e.closest('[role=tooltip],.ant-popover,[class*=assistantContent],[class*=AssistantContent]') && visible(e) && r.width>=(smallSpec?16:35) && !/data:image\/svg|\.svg(?:\?|$)/i.test(e.getAttribute('src')||'');
     });
   };
@@ -121,10 +121,11 @@
   }
   if (op === 'remove_photo') {
     const image=photos(root)[0];
-    for(let box=image?.parentElement;box && box!==root;box=box.parentElement){
+    for(let box=image?.parentElement;box && root.contains(box);box=box.parentElement){
       if(box.querySelector('select,[role=combobox],input[placeholder*=备注]'))break;
       const control=remove(box,true);
       if(control)return mark(control);
+      if(box===root)break;
     }
     return null;
   }

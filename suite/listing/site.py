@@ -10,6 +10,7 @@ from .models import ListingError, Cancelled, SaveUncertain
 from .browser import ENTRY_URL
 from .vision import normalize_size
 from .page_ai import PageAI, FORBIDDEN
+from .spec_reader import read_rows
 from .workflow import DESCRIBE, page_key, scope_key, replay, safe_target
 
 DOM = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
@@ -768,12 +769,39 @@ class DouyinPage:
         )
         self.editor_url = self.page.url
 
-    def specs(self, label):
-        selector = self.section(label)
-        records = self.dom("specs", selector=selector) or []
-        if not records:
-            raise ListingError(f"无法读取页面的{label}选项。")
-        return selector, records
+    def specs(self, label, allow_empty=False):
+        selector, legacy = None, []
+        try:
+            selector = self.dom("section", label)
+            legacy = (self.dom("specs", selector=selector) or []) if selector else []
+        except ListingError:
+            pass
+        # Visible row geometry handles separate dropdown/note/icon wrappers,
+        # selected values stored in inputs, and header-only legacy scopes.
+        region, layout = read_rows(self.page, label, None, self.cancel, self.log)
+        if (
+            legacy
+            and len(legacy) >= len(layout)
+            and len({r["name"] for r in legacy}) == len(legacy)
+        ):
+            return selector, legacy
+        if layout:
+            self.log(
+                f"按实际布局读取{label}：{len(layout)} 项，"
+                + " / ".join(r["name"] for r in layout)
+            )
+            return region, layout
+        if self.client is not None:
+            region, layout = read_rows(
+                self.page, label, self.client, self.cancel, self.log
+            )
+            if layout:
+                return region, layout
+        if allow_empty and (selector or region):
+            return selector or region, []
+        raise ListingError(
+            f"无法读取页面的{label}选项；已尝试控件结构、实际布局及 AI 读取。"
+        )
 
     def fill_sku(self, sku, require_same=False):
         selector = self.section("货号")
@@ -812,9 +840,10 @@ class DouyinPage:
             record = next((row for row in records if row["name"] == color), None)
             if not record:
                 raise ListingError(f"页面颜色 {color} 已变化，停止当前货号。")
-            self.clear(record["row"])
-            trigger = None
-            if not self.dom("file_inputs", selector=record["row"]):
+            field = record.get("photo") or record["row"]
+            self.clear(field)
+            trigger = self.page.locator(field) if record.get("photo") else None
+            if trigger is None and not self.dom("file_inputs", selector=field):
                 photo = self.dom("spec_photo_trigger", selector=record["row"])
                 trigger = (
                     self.page.locator(photo)
@@ -824,12 +853,11 @@ class DouyinPage:
                         self.page.locator(record["row"]),
                     )
                 )
-            self.upload(record["row"], [path], trigger=trigger)
+            self.upload(field, [path], trigger=trigger)
 
     def set_sizes(self, sizes):
         desired = {normalize_size(row["name"]): row["weight"] for row in sizes}
-        selector = self.section("尺码大小")
-        records = self.dom("specs", selector=selector) or []
+        selector, records = self.specs("尺码大小", allow_empty=True)
         for record in records:
             if normalize_size(record["name"]) not in desired:
                 if not record["remove"]:
@@ -837,11 +865,7 @@ class DouyinPage:
                 self.page.locator(record["remove"]).click()
                 self.confirm_modal(("确定", "确认", "删除"))
         for name in desired:
-            selector, records = (
-                self.specs("尺码大小")
-                if self.dom("specs", selector=selector)
-                else (selector, [])
-            )
+            selector, records = self.specs("尺码大小", allow_empty=True)
             if any(normalize_size(row["name"]) == name for row in records):
                 continue
             scope = self.page.locator(selector)
