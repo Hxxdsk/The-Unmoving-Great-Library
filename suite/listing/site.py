@@ -912,14 +912,21 @@ class DouyinPage:
 
     def set_color_photos(self, analysis):
         _, initial = self.specs("颜色分类")
-        if {r["name"] for r in initial} != set(analysis.colors):
-            raise ListingError("网站颜色与 AI 配图结果不一致，停止当前货号")
-        for color in [r["name"] for r in initial]:
+        for color in list(analysis.colors):
+            if color not in {r["name"] for r in initial}:
+                self.log(f"跳过颜色 {color}：网页已无该项")
+                analysis.colors.pop(color)
+                if color not in analysis.skipped_colors:
+                    analysis.skipped_colors.append(color)
+        for color in [r["name"] for r in initial if r["name"] in analysis.colors]:
             path = analysis.colors[color]
             _, records = self.specs("颜色分类")
             record = next((row for row in records if row["name"] == color), None)
             if not record:
-                raise ListingError(f"页面颜色 {color} 已变化，停止当前货号。")
+                self.log(f"跳过颜色 {color}：页面已变化，继续处理其他颜色")
+                analysis.colors.pop(color, None)
+                analysis.skipped_colors.append(color)
+                continue
             field = record.get("photo") or record["row"]
             self.clear(field)
             trigger = self.page.locator(field) if record.get("photo") else None
@@ -1129,10 +1136,11 @@ class DouyinPage:
             raise ListingError("最终货号校验失败，禁止保存，避免串款。")
         self.tab("价格库存")
         _, colors = self.specs("颜色分类")
-        if {r["name"] for r in colors} != set(analysis.colors) or any(
-            r["photos"] != 1 for r in colors
+        matched = {r["name"]: r for r in colors}
+        if not set(analysis.colors).issubset(matched) or any(
+            matched[name]["photos"] != 1 for name in analysis.colors
         ):
-            raise ListingError("颜色规格图未全部确认。")
+            raise ListingError("已匹配颜色的规格图未确认。")
         _, sizes = self.specs("尺码大小")
         expected = {normalize_size(s["name"]): s["weight"] for s in analysis.sizes}
         if {normalize_size(r["name"]) for r in sizes} != set(expected):

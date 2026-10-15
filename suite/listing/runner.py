@@ -188,8 +188,14 @@ class BatchRunner:
                                 stage="草稿已保存",
                                 editor_url=page.editor_url,
                                 result_url=url,
+                                skipped_colors=analysis.skipped_colors,
                             )
-                            self.report(product.sku, "已保存", "草稿已保存", 100)
+                            message = "草稿已保存"
+                            if analysis.skipped_colors:
+                                message += "；跳过颜色：" + " / ".join(
+                                    analysis.skipped_colors
+                                )
+                            self.report(product.sku, "已保存", message, 100)
                             results.append((product.sku, "已保存"))
                     except SaveUncertain as exc:
                         journal.update(

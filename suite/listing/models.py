@@ -78,7 +78,7 @@ def scan_products(root: Path) -> list[Product]:
                 else ()
             )
             images[name] = paths
-            if not paths:
+            if not paths and name != "颜色":
                 issues.append(f"{name} 文件夹缺少图片")
             for path in paths:
                 stat = path.stat()

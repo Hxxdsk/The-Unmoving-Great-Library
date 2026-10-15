@@ -367,6 +367,10 @@ class ListingWindow(QMainWindow):
             ]
             for column, value in enumerate(values, 1):
                 self.table.setItem(row, column, QTableWidgetItem(value))
+            if not product.images["颜色"]:
+                self.log.appendPlainText(
+                    f"{product.sku}：无颜色主图，跳过颜色配图，继续其他步骤。"
+                )
             if len(product.images["800"]) > 5 or len(product.images["3.4"]) > 5:
                 self.log.appendPlainText(
                     f"{product.sku}：主图/3:4 只使用自然排序前五张。"

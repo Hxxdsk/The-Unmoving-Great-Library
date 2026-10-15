@@ -9,16 +9,17 @@ from suite.listing.site import DouyinPage
 from suite.listing.vision import Analysis, analyze
 
 
-def test_colors_are_required_and_ai_uses_only_color_folder(tmp_path):
+def test_missing_colors_are_skipped_and_ai_uses_only_color_folder(tmp_path):
     product = make_product(tmp_path)
     result = analyze(Client(), product, ["灰色", "黑色"], threading.Event())
     assert all(p.parent.name == "颜色" for p in result.colors.values())
     for image in product.images["颜色"]:
         image.unlink()
     product = scan_products(tmp_path)[0]
-    assert "颜色 文件夹缺少图片" in product.issues
-    with pytest.raises(ListingError, match="颜色文件夹缺少"):
-        analyze(Client(), product, ["灰色", "黑色"], threading.Event())
+    assert "颜色 文件夹缺少图片" not in product.issues
+    result = analyze(Client(), product, ["灰色", "黑色"], threading.Event())
+    assert result.colors == {}
+    assert result.skipped_colors == ["灰色", "黑色"]
 
 
 def test_details_replaced_before_generation_and_main_retained(tmp_path, session):

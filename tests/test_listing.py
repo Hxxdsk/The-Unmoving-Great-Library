@@ -160,10 +160,10 @@ def test_vision_uses_only_valid_fronts_and_explicit_weights(tmp_path):
     assert normalize_size("XXXL") == "3XL"
     bad = client.generate([], {})
     bad["colors"][0]["view"] = "背面"
-    with patch.object(client, "generate", return_value=bad), pytest.raises(
-        ListingError, match="正面图需核对"
-    ):
-        analyze(client, product, ["灰色", "黑色"], threading.Event())
+    with patch.object(client, "generate", return_value=bad):
+        partial = analyze(client, product, ["灰色", "黑色"], threading.Event())
+    assert "灰色" not in partial.colors
+    assert partial.skipped_colors == ["灰色"]
 
 
 def test_full_browser_workflow_preserves_sku_replaces_details_and_only_saves_draft(
