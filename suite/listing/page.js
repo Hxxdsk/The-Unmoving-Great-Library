@@ -6,18 +6,19 @@
     if (!e.dataset.glId) e.dataset.glId = 'gl' + crypto.randomUUID().replaceAll('-','');
     return '[data-gl-id="' + e.dataset.glId + '"]';
   };
-  const photos = root => [...root.querySelectorAll('img')].filter(e => visible(e) && e.getBoundingClientRect().width >= 35 && !/data:image\/svg|\.svg(?:\?|$)/i.test(e.getAttribute('src') || ''));
+  const photos = root => [...root.querySelectorAll('img')].filter(e => !e.closest('[role=tooltip],.ant-popover,[class*=assistantContent],[class*=AssistantContent]') && visible(e) && e.getBoundingClientRect().width >= 35 && !/data:image\/svg|\.svg(?:\?|$)/i.test(e.getAttribute('src') || ''));
   const remove = root => [...root.querySelectorAll('button,[role=button],[class*=delete],[class*=Delete],[class*=remove],[data-icon=delete],.anticon-close-circle')]
     .find(e => visible(e) && (/删除|移除|清空/.test(e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || '') || /delete|Delete|remove|close-circle/.test(e.className?.baseVal || e.className || '') || e.getAttribute('data-icon') === 'delete'));
   if (op === 'section' || op === 'section_from') {
     const target = norm(label);
-    const anchors=new Set(['主图','主图3:4','白底图','商品详情','水洗标/吊牌图','水洗标/吊牌图片','货号','颜色分类','尺码大小','价格与库存']);
+    const anchors=new Set(['主图','主图3:4','白底图','商品详情','水洗标/吊牌图','水洗标/吊牌图片','货号','颜色分类','尺码大小','价格与库存','面料材质','填充物种类','品牌','重要属性','材质成分']);
+    const imageField=/^(主图|主图3:4|白底图|商品详情|水洗标\/吊牌图|水洗标\/吊牌图片)$/.test(target);
     const labels = op === 'section_from' ? [document.querySelector(selector)].filter(Boolean) : [...document.querySelectorAll('label,span,div,p,h1,h2,h3,h4')].filter(e => visible(e) && (norm(e.innerText) === target || [...e.childNodes].some(n=>n.nodeType===3 && norm(n.textContent)===target)))
       .sort((a,b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
     for (const leaf of labels) {
       for (let e=leaf.parentElement, depth=0; e && e !== document.body && depth < 9; e=e.parentElement, depth++) {
         if(anchors.has(target) && [...e.querySelectorAll('label,span,div,p')].some(n=>visible(n) && anchors.has(norm(n.innerText)) && norm(n.innerText)!==target))break;
-        if (e.querySelector('input,select,textarea,[role=combobox],table,[contenteditable=true],[class*=upload],[class*=Upload],[data-icon=picture],.anticon-picture') || photos(e).length ||
+        if (e.querySelector(imageField ? 'input[type=file],[class*=upload],[class*=Upload],[data-icon=picture],.anticon-picture' : 'input,select,textarea,[role=combobox],table,[contenteditable=true],[class*=upload],[class*=Upload],[data-icon=picture],.anticon-picture') || photos(e).length ||
             [...e.querySelectorAll('button,[role=button],span,div')].some(b => /^(上传图片|上传主图|上传辅助图|图片|本地上传|清空)$/.test(b.innerText.trim()))) {
           if (e.getBoundingClientRect().height > 2000 && depth > 2) break;
           return mark(e);
@@ -28,6 +29,48 @@
   }
   const root = selector ? document.querySelector(selector) : document.body;
   if (!root) return null;
+  if (op === 'hover_point') {
+    const boundary=document.querySelector(label);
+    if(!boundary||!boundary.contains(root))return null;
+    const r=root.getBoundingClientRect();
+    for(const [fx,fy] of [[.5,.5],[.25,.25],[.75,.25],[.25,.75],[.75,.75]]){
+      const x=r.x+r.width*fx,y=r.y+r.height*fy;
+      if(x<0||y<0||x>=innerWidth||y>=innerHeight)continue;
+      const hit=document.elementFromPoint(x,y);
+      for(let e=root;e&&boundary.contains(e);e=e.parentElement){
+        if(e===boundary && (e.getBoundingClientRect().width>450||e.getBoundingClientRect().height>450))break;
+        if(hit && e.contains(hit)){
+          const box=e.getBoundingClientRect();
+          return {selector:mark(e),x:x-box.x,y:y-box.y};
+        }
+        if(e===boundary)break;
+      }
+    }
+    return null;
+  }
+  if(op==='assistant_close'){
+    const r=root.getBoundingClientRect();
+    const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+    let box=hit?.closest('[class*=assistant],[class*=Assistant]');
+    for(let i=0;box&&i<3;i++,box=box.parentElement){
+      const controls=[...box.querySelectorAll('button,[role=button],[class*=close],[class*=Close]')].filter(e=>visible(e)&&(/^(关闭|收起|最小化|×|✕)$/.test((e.getAttribute('aria-label')||e.title||e.innerText||'').trim())||/close/i.test(e.className||'')));
+      if(controls.length===1)return mark(controls[0]);
+      if(box.getBoundingClientRect().width>innerWidth*.8)break;
+    }
+    return null;
+  }
+  if(op==='upload_menu'){
+    const origin=root.getBoundingClientRect(), rows=[];
+    for(const e of document.querySelectorAll('button,[role=menuitem],[role=button],span,div')){
+      if(!visible(e)||norm(e.innerText)!=='本地上传'||e.querySelector('button,[role=menuitem],[role=button]'))continue;
+      const r=e.getBoundingClientRect(), hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+      if(!hit||!(e.contains(hit)||hit.contains(e)))continue;
+      const distance=Math.hypot(r.x+r.width/2-(origin.x+origin.width/2),r.y+r.height/2-(origin.y+origin.height/2));
+      if(distance<400)rows.push({e,distance});
+    }
+    rows.sort((a,b)=>a.distance-b.distance);
+    return rows.length?mark(rows[0].e):null;
+  }
   if (op === 'photos') return photos(root).map(mark);
   if (op === 'busy') return [...root.querySelectorAll('[aria-busy=true],[class*=uploading],[class*=Uploading],.ant-spin-spinning')].some(visible);
   if (op === 'input') {

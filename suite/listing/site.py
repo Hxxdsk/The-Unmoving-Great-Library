@@ -261,6 +261,34 @@ class DouyinPage:
     def photo_count(self, selector):
         return len(self.dom("photos", selector=selector) or [])
 
+    def hover_in_field(self, target, field):
+        """Hover the real thumbnail/upload hit area, including its own overlay."""
+        target.scroll_into_view_if_needed(timeout=4000)
+        leaf = target.evaluate(
+            "e=>{if(!e.dataset.glId)e.dataset.glId='gl'+crypto.randomUUID().replaceAll('-','');return '[data-gl-id=\"'+e.dataset.glId+'\"]'}"
+        )
+        for attempt in range(2):
+            self.check()
+            point = self.dom("hover_point", label=field, selector=leaf)
+            if point:
+                self.page.locator(point["selector"]).hover(
+                    position={"x": point["x"], "y": point["y"]}, timeout=4000
+                )
+                return
+            close = self.dom("assistant_close", selector=leaf)
+            if close:
+                self.log("收起遮挡当前图片字段的辅助浮层")
+                self.page.locator(close).click(timeout=3000)
+            else:
+                # Move out of hover previews and close transient menus before
+                # trying again; never force-click through an unrelated overlay.
+                self.page.mouse.move(0, 0)
+                self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(250)
+        raise ListingError(
+            "当前图片字段被浮层遮挡，请收起辅助浮窗后重试；未强制点击或删除其他字段。"
+        )
+
     def upload(self, selector, paths):
         paths = [str(Path(path).resolve()) for path in paths]
         if not paths:
@@ -287,10 +315,10 @@ class DouyinPage:
                 )
         else:
             scope = self.page.locator(selector)
-            target = scope.get_by_text(
-                re.compile(r"^(上传图片|上传主图|上传辅助图|图片|本地上传)$")
-            ).first
-            if not target.count():
+            target = self.visible_control(
+                re.compile(r"^(上传图片|上传主图|上传辅助图|图片|本地上传)$"), scope
+            )
+            if target is None:
                 trigger = self.dom("upload_trigger", selector=selector)
                 target = (
                     self.page.locator(trigger)
@@ -300,12 +328,33 @@ class DouyinPage:
                     )
                 )
             self.record_action(target, "hover")
-            target.hover()
-            local = self.page.get_by_text("本地上传", exact=True)
-            if local.count() and local.last.is_visible():
-                target = local.last
+            self.hover_in_field(target, selector)
+            # React portals can be mounted after hover and outside the field.
+            # Wait for a nearby visible local-upload entry, not the last match
+            # from unrelated fields or hidden popovers.
+            local = None
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline:
+                self.check()
+                local = self.dom("upload_menu", selector=selector)
+                if local:
+                    break
+                self.page.wait_for_timeout(100)
+            if local:
+                target = self.page.locator(local)
+            else:
+                # Some sites open the picker directly from the upload tile.
+                # A popup with a renamed entry can also be located with AI.
+                menu = self.page.locator(
+                    "[role=menu]:visible,.ant-popover:visible,[class*=dropdown]:visible"
+                )
+                if menu.count() and self.client is not None:
+                    target = self.control(
+                        "选择当前图片上传浮层中的本地上传入口，不要图库选择或其他字段"
+                    )
+                    self.record_action(target)
             with self.page.expect_file_chooser(timeout=10000) as chooser:
-                target.click()
+                target.click(timeout=5000)
             if len(paths) > 1 and not chooser.value.is_multiple():
                 raise ListingError("该上传控件仅支持单张图片，请检查页面适配。")
             chooser.value.set_files(paths)
@@ -330,7 +379,7 @@ class DouyinPage:
                 image = self.page.locator(
                     (self.dom("photos", selector=selector) or [])[0]
                 )
-                image.hover()
+                self.hover_in_field(image, selector)
                 remove = self.dom("remove_photo", selector=selector)
                 if not remove:
                     raise ListingError("无法确认删除该字段的原图片，未追加新图。")
