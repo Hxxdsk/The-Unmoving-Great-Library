@@ -2,7 +2,7 @@
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
 const hook = () => ({listeners: [], addListener(fn) {this.listeners.push(fn);}});
 const tabs = new Map(), calls = [], commands = [];
-let seq = 0;
+let seq = 0, userFocused = false, windowState = "minimized";
 const chrome = {
   runtime: {onMessage: hook()},
   debugger: {
@@ -20,8 +20,12 @@ const chrome = {
       const tab={id:++seq,windowId:100,url:options.url};tabs.set(tab.id,tab);
       return {id:100,tabs:[tab]};
     },
-    async get(id) {assert.equal(id,100);return {id};},
-    async update() {throw new Error('must never restore or alter the work window');}
+    async get(id) {assert.equal(id,100);return {id,focused:userFocused,state:windowState};},
+    async update(id,options) {
+      assert.equal(id,100);assert(userFocused,'must not maximize in background');
+      assert.equal(options.state,'maximized');assert.equal(Object.keys(options).join(','),'state');
+      calls.push({op:'user-maximize',id});windowState='maximized';return {id,state:windowState,focused:true};
+    }
   },
   tabs: {
     onCreated: hook(), onRemoved: hook(), onUpdated: hook(),
@@ -79,8 +83,17 @@ vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'
   const beforeUser=calls.length;
   chrome.windows.onFocusChanged.listeners[0](500);
   assert.equal(calls.length,beforeUser,'ordinary window focus must not change work tabs');
+  userFocused=true;windowState="normal";
   chrome.windows.onFocusChanged.listeners[0](100);
   await new Promise(resolve=>setTimeout(resolve,0));
   assert.equal(calls.at(-1).op,'user-view-tab');assert.equal(calls.at(-1).options.active,true);
+  assert.equal(calls.filter(c=>c.op==='user-maximize').length,1,'taskbar viewing must maximize the work window');
+  chrome.windows.onFocusChanged.listeners[0](100);
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(calls.filter(c=>c.op==='user-maximize').length,1,'already maximized window must not resize again');
+  userFocused=false;windowState='normal';const beforeStale=calls.length;
+  chrome.windows.onFocusChanged.listeners[0](100);
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(calls.length,beforeStale,'stale focus event must not change a background window');
   console.log('background window, inactive tabs, owned popup routing, focus suppression: passed');
 })().catch(error=>{console.error(error);process.exit(1);});

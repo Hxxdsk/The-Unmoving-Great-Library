@@ -207,12 +207,22 @@ chrome.tabs.onCreated.addListener(tab => {
     if (autoAttach) await attach(tab.id);
   })().catch(error => console.warn('工作子页尚未就绪：', error.message));
 });
-// The user chose this window (for example via the taskbar): show its current
-// work tab without ever requesting OS activation ourselves.
+// Only after the user activates the work window, expand it for viewing.
+// Never combine maximized with focused:false or restore it in background code.
 chrome.windows.onFocusChanged.addListener(windowId => {
-  if (windowId === workWindow && owned.has(latestWorkTab)) {
-    chrome.tabs.update(latestWorkTab, {active: true}).catch(() => {});
-  }
+  if (windowId !== workWindow || !owned.has(latestWorkTab)) return;
+  (async () => {
+    const window = await chrome.windows.get(windowId);
+    // The user may have switched away while this event was being processed.
+    if (!window.focused || window.state === 'minimized') return;
+    if (window.state !== 'maximized' && window.state !== 'fullscreen') {
+      await chrome.windows.update(windowId, {state: 'maximized'});
+    }
+    const current = await chrome.windows.get(windowId);
+    if (current.focused && owned.has(latestWorkTab)) {
+      await chrome.tabs.update(latestWorkTab, {active: true});
+    }
+  })().catch(error => console.warn('工作窗口查看状态未调整：', error.message));
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type !== 'connect') return;
