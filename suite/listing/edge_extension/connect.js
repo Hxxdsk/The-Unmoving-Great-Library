@@ -5,7 +5,7 @@ if (location.pathname === '/greatlibrary/connect' && location.hostname === '127.
     chrome.runtime.sendMessage({type: 'connect', port: Number(location.port), token}, response => {
       const result = document.getElementById('status');
       if (result) result.textContent = chrome.runtime.lastError?.message || response?.error ||
-        '已连接。请回到工具箱开始任务；抖店登录状态直接沿用当前 Edge。';
+        '已连接。任务使用独立普通窗口，不抢占其他窗口焦点；沿用当前 Edge 登录状态。';
     });
   }
 }

@@ -3,6 +3,7 @@
 const fs = require('node:fs'), vm = require('node:vm');
 const [source, realEndpoint, port, token] = process.argv.slice(2);
 const ws = new WebSocket(realEndpoint), pending = new Map();
+const tabWindows = new Map();
 const tabs = new Map(), roots = new Map(), rootTabs = new Map();
 let sequence = 0, tabSequence = 0;
 const hook = () => ({handlers: [], addListener(fn) {this.handlers.push(fn);}, emit(...args) {for (const fn of this.handlers) fn(...args);}});
@@ -26,16 +27,26 @@ const chrome = {
     async attach({tabId}) {const result = await call('Target.attachToTarget', {targetId: tabs.get(tabId), flatten: true}); roots.set(tabId, result.sessionId); rootTabs.set(result.sessionId, tabId);},
     async detach({tabId}) {const sessionId = roots.get(tabId); roots.delete(tabId); rootTabs.delete(sessionId); if (sessionId) await call('Target.detachFromTarget', {sessionId});},
     sendCommand(target, method, params) {return call(method, params, target.sessionId || roots.get(target.tabId));}},
+  windows: {
+    async create({url, type, focused}) {
+      if(type !== 'normal' || focused !== false) throw new Error('work window must be ordinary and unfocused');
+      const result=await call('Target.createTarget',{url,newWindow:true,background:true});
+      const {windowId}=await call('Browser.getWindowForTarget',{targetId:result.targetId});
+      const id=++tabSequence; tabs.set(id,result.targetId);tabWindows.set(id,windowId);
+      return {id:windowId,tabs:[{id,url,windowId}]};
+    },
+    async get(id) {if(![...tabWindows.values()].includes(id))throw new Error('window closed');return {id};}
+  },
   tabs: {onRemoved: tabRemoved, onUpdated: tabUpdated, onCreated: tabCreated,
-    async create({url}) {const result = await call('Target.createTarget', {url}); const id = ++tabSequence; tabs.set(id, result.targetId); return {id, url, windowId: 1};},
-    async get(id) {const result = await call('Target.getTargetInfo', {targetId: tabs.get(id)}); return {id, url: result.targetInfo.url, title: result.targetInfo.title, windowId: 1};},
+    async create({url, windowId, active}) {const result = await call('Target.createTarget', {url, background:true, newWindow:!!windowId}); const id = ++tabSequence; tabs.set(id, result.targetId);tabWindows.set(id,windowId||1); return {id, url, windowId: windowId||1};},
+    async get(id) {const result = await call('Target.getTargetInfo', {targetId: tabs.get(id)}); return {id, url: result.targetInfo.url, title: result.targetInfo.title, windowId: tabWindows.get(id)};},
     async remove(id) {await call('Target.closeTarget', {targetId: tabs.get(id)});}}
 };
 ws.onopen = async () => {
   await call('Target.setDiscoverTargets', {discover: true});
   // A normal tab exists before the extension connects and must stay inaccessible.
   await chrome.tabs.create({url: 'about:blank#ordinary-user-tab'});
-  const context = {chrome, WebSocket, URL, navigator: {userAgent: 'Chrome/147.0.0.0'}, setInterval, clearInterval, console};
+  const context = {chrome, WebSocket, URL, navigator: {userAgent: 'Chrome/147.0.0.0'}, setTimeout, clearTimeout, setInterval, clearInterval, console};
   vm.createContext(context); vm.runInContext(fs.readFileSync(source, 'utf8'), context);
   const result = await new Promise(resolve => message.handlers[0]({type: 'connect', port: Number(port), token},
     {url: `http://127.0.0.1:${port}/greatlibrary/connect#${token}`, tab: {id: 1, windowId: 1, incognito: false}}, resolve));

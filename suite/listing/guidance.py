@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .models import ListingError, Cancelled
-from .workflow import resolve
+from .workflow import resolve, safe_target
 from .page_ai import FORBIDDEN
 
 SCRIPT = Path(__file__).with_name("human.js").read_text(encoding="utf-8")
@@ -22,6 +22,7 @@ class UserGuide:
         self.resume, self.skip = threading.Event(), threading.Event()
         self.active = None
         self.events = []
+        self.seen_events = set()
         self.bound = set()
         self.binding = "__glHuman_" + secrets.token_hex(8)
 
@@ -45,6 +46,11 @@ class UserGuide:
         ):
             return
         if isinstance(data.get("target"), dict) and len(self.events) < 48:
+            event_id = data.get("event_id")
+            if event_id and event_id in self.seen_events:
+                return
+            if isinstance(event_id, str):
+                self.seen_events.add(event_id)
             self.events.append({"kind": data["kind"], "target": data["target"]})
 
     def install(self, page, mode):
@@ -72,10 +78,12 @@ class UserGuide:
         allow_partial=False,
     ):
         self.events, self.active = [], secrets.token_hex(16)
+        self.seen_events.clear()
         self.resume.clear()
         self.skip.clear()
         current, installed = page, []
         clicks_seen, settle_since = 0, None
+        deadline = time.monotonic() + 120
         self.notify(goal, mode)
         try:
             while True:
@@ -83,6 +91,8 @@ class UserGuide:
                     raise Cancelled("已停止用户指导")
                 if self.skip.is_set():
                     raise ListingError("用户跳过了当前款的指导步骤")
+                if time.monotonic() > deadline:
+                    raise ListingError("用户指导等待超时，跳过当前款，继续后续任务")
                 if observe:
                     current = observe() or current
                 if current not in installed or not current.evaluate(
@@ -91,15 +101,32 @@ class UserGuide:
                     self.install(current, mode)
                     if current not in installed:
                         installed.append(current)
+                # A page rerender can delay the exposed-binding callback; the
+                # page-local queue provides an acknowledgement fallback.
+                queued = current.evaluate(
+                    "()=>{const q=window.__glHumanQueue||[];window.__glHumanQueue=[];return q}"
+                )
+                for data in queued:
+                    self.event({"page": current, "frame": current.main_frame}, data)
                 if mode == "pick" and any(e["kind"] == "click" for e in self.events):
                     last = next(
                         e for e in reversed(self.events) if e["kind"] == "click"
                     )
-                    target = resolve(current, last["target"], root, allow_save)
+                    live = last["target"].get("live", "")
+                    target = (
+                        current.locator('[data-gl-human-id="' + live + '"]')
+                        if re.fullmatch(r"[a-f0-9-]{36}", live)
+                        else None
+                    )
+                    if target is None or target.count() != 1 or not target.is_visible():
+                        target = resolve(current, last["target"], root, allow_save)
                     if target is None:
                         self.events.clear()
+                        self.install(current, mode)
                         self.notify("所选控件已变化，请重新点击：" + goal, mode)
                     else:
+                        safe_target(target, allow_save)
+                        self.notify("已收到点击，正在继续：" + goal, mode)
                         # The click was intercepted; the caller performs it exactly once.
                         return target, self.recipe(target_only=True)
                 if mode == "record" and condition and condition():
@@ -108,6 +135,8 @@ class UserGuide:
                     clicks = sum(e["kind"] == "click" for e in self.events)
                     if clicks != clicks_seen:
                         clicks_seen, settle_since = clicks, time.monotonic()
+                        deadline = time.monotonic() + 120
+                        self.notify("已收到操作，正在检查当前页面：" + goal, mode)
                     if (
                         settle_since is not None
                         and time.monotonic() - settle_since > 0.7

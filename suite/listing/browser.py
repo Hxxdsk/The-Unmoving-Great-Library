@@ -18,6 +18,14 @@ class EdgeSession:
     def own_page(self, page):
         self.page = page
 
+    def next_work_page(self):
+        old = list(self.context.pages)
+        self.page = self.context.new_page()
+        for page in old:
+            if not page.is_closed():
+                page.close()
+        return self.page
+
     def new_work_page(self):
         if self.page is not None and not self.page.is_closed():
             return self.page

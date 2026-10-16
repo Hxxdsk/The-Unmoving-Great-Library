@@ -34,7 +34,9 @@ def test_details_replaced_before_generation_and_main_retained(tmp_path, session)
         assert details["files"] == ["1.png", "2.png"]
         assert audit.index(details) < audit.index(generation)
         assert len(s.page.locator("#main img").all()) == 5
-        assert page.details_prepared
+        assert not page.details_prepared
+        assert generation["title"] == product.title
+        assert not any(e["event"] == "title" for e in audit)
 
 
 def test_initial_empty_size_list_can_be_filled(session):

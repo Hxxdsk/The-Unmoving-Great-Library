@@ -37,6 +37,17 @@ class Product:
     images: dict[str, tuple[Path, ...]]
     issues: list[str]
     fingerprint: str
+    title: str = ""
+    color_references: tuple[Path, ...] = ()
+    color_uploads: tuple[Path, ...] | None = None
+
+    @property
+    def color_photos(self):
+        return (
+            self.images.get("颜色", ())
+            if self.color_uploads is None
+            else self.color_uploads
+        )
 
     @property
     def sku(self):
@@ -142,8 +153,10 @@ class Journal:
 
     def resumable(self, product):
         old = self.get(product)
-        if old.get("status") in ("saved", "uncertain", "saving"):
-            return False, "已保存" if old["status"] == "saved" else "保存结果待核对"
-        if old and old.get("fingerprint") != product.fingerprint:
-            return False, "资料已变化，请核对并重置记录"
+        if old:
+            return False, (
+                "已处理，请重置记录后重新新建"
+                if old.get("status") not in ("saving", "uncertain")
+                else "保存结果待核对，请核对后重置记录"
+            )
         return True, ""

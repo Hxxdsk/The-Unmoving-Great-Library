@@ -8,7 +8,7 @@ from pathlib import Path
 from .models import Journal, ListingError, Cancelled, SaveUncertain
 from .browser import EdgeSession
 from .site import DouyinPage
-from .vision import analyze
+from .vision import analyze, prepare_color_sources
 
 
 @contextlib.contextmanager
@@ -79,9 +79,10 @@ class BatchRunner:
                         self.report(product.sku, status, message, 0)
                         results.append((product.sku, status))
                         continue
-                    old = journal.get(product)
                     stage = "创建商品"
-                    if hasattr(session, "new_work_page"):
+                    if hasattr(session, "next_work_page"):
+                        session.next_work_page()
+                    elif hasattr(session, "new_work_page"):
                         session.new_work_page()
                     page = DouyinPage(
                         session,
@@ -101,7 +102,7 @@ class BatchRunner:
                             product,
                             status="running",
                             stage=name,
-                            editor_url=page.editor_url or old.get("editor_url", ""),
+                            editor_url=page.editor_url,
                         )
                         self.report(product.sku, "处理中", name, percent)
                         if self.cancel.is_set():
@@ -111,22 +112,11 @@ class BatchRunner:
                         with tempfile.TemporaryDirectory(
                             prefix="greatlibrary-listing-"
                         ) as temp:
-                            advance(
-                                (
-                                    "恢复编辑页"
-                                    if old.get("editor_url")
-                                    else "上传主图并生成商品"
-                                ),
-                                5,
+                            advance("从新页面上传主图并生成商品", 5)
+                            prepare_color_sources(
+                                self.client, product, self.cancel, page.log
                             )
-                            if old.get("editor_url"):
-                                page.resume(old["editor_url"])
-                            else:
-                                page.create(product)
-                            # Resume identity is checked before touching existing images.
-                            if old.get("editor_url"):
-                                page.tab("属性信息")
-                                page.fill_sku(product.sku, require_same=True)
+                            page.create(product)
                             advance("按页面顺序填写图文信息", 25)
                             page.tab("图文信息")
                             fields = [
@@ -135,13 +125,26 @@ class BatchRunner:
                             ]
                             if not page.details_prepared:
                                 fields.append((("商品详情",), product.images["详情"]))
-                            page.replace_images_in_page_order(fields)
+                            for names, paths in page.fields_in_page_order(fields):
+                                try:
+                                    page.replace_images(names, paths)
+                                except Cancelled:
+                                    raise
+                                except Exception as exc:
+                                    page.log(f"跳过图片字段 {'/'.join(names)}：{exc}")
+                                    page.dismiss_optional_dialogs()
                             advance("水洗标与货号", 40)
                             page.tab("属性信息")
-                            page.replace_images(
-                                ("水洗标/吊牌图", "水洗标/吊牌图片"),
-                                product.images["水洗标"],
-                            )
+                            try:
+                                page.replace_images(
+                                    ("水洗标/吊牌图", "水洗标/吊牌图片"),
+                                    product.images["水洗标"],
+                                )
+                            except Cancelled:
+                                raise
+                            except Exception as exc:
+                                page.log(f"跳过水洗标图片：{exc}")
+                                page.dismiss_optional_dialogs()
                             sku_control = page.fill_sku(product.sku)
                             advance("识别颜色正面图、尺码与体重", 50)
                             page.ship_48h()
@@ -159,8 +162,8 @@ class BatchRunner:
                             page.set_color_photos(analysis)
                             advance("填写尺码与体重备注", 70)
                             page.set_sizes(analysis.sizes)
-                            advance("网站AI解析尺码表", 78)
-                            page.parse_size_chart(product.images["尺码"], temp)
+                            advance("上传AI解析尺码图", 78)
+                            page.try_parse_size_chart(product.images["尺码"], temp)
                             page.reconcile_sizes_after_chart(analysis.sizes)
                             advance("批量价格与现货库存", 86)
                             page.batch_values(self.price, self.inventory)
@@ -217,7 +220,7 @@ class BatchRunner:
                             product,
                             status=status,
                             stage=stage,
-                            editor_url=page.editor_url or old.get("editor_url", ""),
+                            editor_url=page.editor_url,
                             error=str(exc),
                         )
                         self.report(

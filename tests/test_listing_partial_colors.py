@@ -27,9 +27,12 @@ def test_missing_color_images_still_save_and_size_weights_match_each_row(
     for path in product.images["颜色"][photo_count:]:
         path.unlink()
     product = scan_products(tmp_path)[0]
+    product.title = "用户输入的商品标题"
 
     class TableClient(Client):
         def generate(self, parts, schema):
+            if "reference_ids" in schema.get("properties", {}):
+                return super().generate(parts, schema)
             prompt = parts[0]["text"]
             assert "体重(斤)" in prompt and "衣长" in prompt and "模特" in prompt
             assert schema["properties"]["colors"]["items"]["properties"]["photo_id"][

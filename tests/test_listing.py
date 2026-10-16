@@ -38,7 +38,9 @@ def make_product(root, name="货号A"):
             Image.new("RGB", (60, 80), "black" if number % 2 else "gray").save(
                 directory / f"{number}.png"
             )
-    return scan_products(root)[0]
+    product = scan_products(root)[0]
+    product.title = "用户输入的商品标题"
+    return product
 
 
 class Client:
@@ -50,6 +52,8 @@ class Client:
 
     def generate(self, parts, schema):
         self.calls += 1
+        if "reference_ids" in schema.get("properties", {}):
+            return {"reference_ids": [], "invalid_ids": []}
         return {
             "colors": [
                 {
@@ -222,6 +226,8 @@ def test_two_products_finish_serially_without_cross_sku_images(tmp_path, session
     for path in (tmp_path / "货号B" / "800").iterdir():
         path.rename(path.with_name("B" + path.name))
     products = scan_products(tmp_path)
+    for p in products:
+        p.title = "用户输入的" + p.sku
     results = BatchRunner(
         tmp_path,
         products,
@@ -376,6 +382,9 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
         start_new_session=True,
     )
     host = None
+    activity = None
+    activity_stop = threading.Event()
+    activity_errors = []
     try:
         deadline = time.monotonic() + 15
         while not (profile / "DevToolsActivePort").exists():
@@ -418,16 +427,67 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
         )
         assert bridge.connected.wait(10), "扩展协议夹具未连接"
 
+        # Simulate normal use in a non-tool tab while the entire draft runs.
+        def ordinary_activity():
+            try:
+                with connect(real_endpoint, proxy=None) as socket:
+                    sequence = 0
+
+                    def call(method, params=None, session_id=None):
+                        nonlocal sequence
+                        sequence += 1
+                        payload = {
+                            "id": sequence,
+                            "method": method,
+                            "params": params or {},
+                        }
+                        if session_id:
+                            payload["sessionId"] = session_id
+                        socket.send(json.dumps(payload))
+                        while True:
+                            reply = json.loads(socket.recv(timeout=3))
+                            if reply.get("id") == sequence:
+                                assert "error" not in reply, reply
+                                return reply["result"]
+
+                    targets = call("Target.getTargets")["targetInfos"]
+                    ordinary = next(
+                        t["targetId"]
+                        for t in targets
+                        if t["url"] == "about:blank#ordinary-user-tab"
+                    )
+                    sid = call(
+                        "Target.attachToTarget", {"targetId": ordinary, "flatten": True}
+                    )["sessionId"]
+                    while not activity_stop.is_set():
+                        call("Target.activateTarget", {"targetId": ordinary})
+                        call(
+                            "Runtime.evaluate",
+                            {
+                                "expression": "window.ordinaryEdits=(window.ordinaryEdits||0)+1"
+                            },
+                            sid,
+                        )
+                        activity_stop.wait(0.2)
+            except BaseException as exc:
+                activity_errors.append(exc)
+
+        activity = threading.Thread(target=ordinary_activity)
+        activity.start()
+
         class FixtureSession(EdgeSession):
             def __enter__(self):
                 super().__enter__()
-                self.page.route(
+                self.context.route(
                     "**/*",
                     lambda route: route.fulfill(
                         content_type="text/html; charset=utf-8",
                         body=FIXTURE.read_text(),
                     ),
                 )
+                assert self.page.evaluate(
+                    "[document.visibilityState, document.hasFocus()]"
+                ) == ["visible", True]
                 return self
 
         product = make_product(tmp_path / "products")
@@ -440,6 +500,9 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
             session_factory=FixtureSession,
         ).run()
         assert result == [(product.sku, "已保存")]
+        activity_stop.set()
+        activity.join(5)
+        assert not activity.is_alive() and not activity_errors
         assert Journal(tmp_path / "products").get(product)["status"] == "saved"
         # Reconnect from another worker, retaining existing profile login and tabs.
         errors = []
@@ -490,6 +553,9 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
         assert any(t["url"] == "about:blank#ordinary-user-tab" for t in targets)
         assert bridge.connected.is_set() and browser.poll() is None
     finally:
+        activity_stop.set()
+        if activity:
+            activity.join(5)
         bridge.close()
         if host:
             host.terminate()

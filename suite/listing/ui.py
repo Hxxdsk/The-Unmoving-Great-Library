@@ -191,16 +191,17 @@ class ListingWindow(QMainWindow):
         content.addLayout(profiles)
         content.addWidget(
             label(
-                "选择用户流程配置 → 连接 Edge → 开始任务。出现指导提示时在工作页点击正确位置；其他标签页可正常使用。",
+                "选择用户流程配置 → 连接 Edge → 开始任务。出现指导提示时在工作页点击正确位置；任务使用独立普通窗口，其他窗口可正常使用。",
                 "hint",
             )
         )
         outer.addWidget(settings)
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
             [
                 "选择",
                 "货号",
+                "商品标题（必填）",
                 "800 / 3:4",
                 "详情",
                 "白底 / 水洗标",
@@ -211,9 +212,9 @@ class ListingWindow(QMainWindow):
             ]
         )
         self.table.horizontalHeader().setSectionResizeMode(
-            8, QHeaderView.ResizeMode.Stretch
+            9, QHeaderView.ResizeMode.Stretch
         )
-        for col in range(8):
+        for col in range(9):
             self.table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents
             )
@@ -349,12 +350,31 @@ class ListingWindow(QMainWindow):
         except Exception as exc:
             self.error(str(exc))
             return
+        try:
+            titles = json.loads(
+                (Path(self.directory.text()) / "_抖店商品标题.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, ValueError):
+            titles = {}
+        if not isinstance(titles, dict):
+            titles = {}
         self.table.setRowCount(len(self.products))
         for row, product in enumerate(self.products):
             can_run, reason = journal.resumable(product)
             check = QCheckBox()
             check.setChecked(not product.issues and can_run)
             self.table.setCellWidget(row, 0, check)
+            product.title = str(titles.get(product.sku, ""))
+            title = QLineEdit(product.title)
+            title.setMinimumWidth(250)
+            title.setMaxLength(60)
+            title.setPlaceholderText("输入本款商品标题，不使用AI推荐")
+            title.textChanged.connect(
+                lambda text, p=product: self.remember_title(p, text)
+            )
+            self.table.setCellWidget(row, 2, title)
             values = [
                 product.sku,
                 f'{min(5,len(product.images["800"]))} / {min(5,len(product.images["3.4"]))}',
@@ -366,7 +386,9 @@ class ListingWindow(QMainWindow):
                 "；".join(product.issues),
             ]
             for column, value in enumerate(values, 1):
-                self.table.setItem(row, column, QTableWidgetItem(value))
+                self.table.setItem(
+                    row, column if column == 1 else column + 1, QTableWidgetItem(value)
+                )
             if not product.images["颜色"]:
                 self.log.appendPlainText(
                     f"{product.sku}：无颜色主图，跳过颜色配图，继续其他步骤。"
@@ -377,6 +399,24 @@ class ListingWindow(QMainWindow):
                 )
         self.start.setEnabled(True)
         self.save_preferences()
+
+    def remember_title(self, product, text):
+        product.title = text
+        path = product.path.parent / "_抖店商品标题.json"
+        try:
+            titles = (
+                json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            )
+            if not isinstance(titles, dict):
+                titles = {}
+            titles[product.sku] = text
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(titles, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            temporary.replace(path)
+        except (OSError, ValueError) as exc:
+            self.log.appendPlainText(f"标题记忆失败：{exc}")
 
     def selected(self):
         return [
@@ -406,6 +446,7 @@ class ListingWindow(QMainWindow):
         self.stop.setEnabled(value)
         for row in range(self.table.rowCount()):
             self.table.cellWidget(row, 0).setEnabled(not value)
+            self.table.cellWidget(row, 2).setEnabled(not value)
 
     def start_work(self):
         products = self.selected()
@@ -471,7 +512,7 @@ class ListingWindow(QMainWindow):
     def update_row(self, sku, status, message, percent):
         for row, product in enumerate(self.products):
             if product.sku == sku:
-                for column, value in ((6, status), (7, f"{percent}%"), (8, message)):
+                for column, value in ((7, status), (8, f"{percent}%"), (9, message)):
                     self.table.setItem(row, column, QTableWidgetItem(value))
                 self.table.scrollToItem(self.table.item(row, 1))
                 break

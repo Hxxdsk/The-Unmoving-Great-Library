@@ -1,10 +1,16 @@
 // A narrow CDP relay: expose only tabs created by this extension to Playwright.
 let socket = null, heartbeat = null, autoAttach = false, discover = false;
-let connectWindow = null, epoch = null, detaching = Promise.resolve();
+let workWindow = null, epoch = null, creating = 0, detaching = Promise.resolve();
 const owned = new Set(), attached = new Set(), children = new Map(), targets = new Map();
 const tabForTarget = targetId => [...targets].find(([tabId, id]) => id === targetId)?.[0];
 async function remember(tab) {
-  const target = (await chrome.debugger.getTargets()).find(t => t.tabId === tab.id && t.type === "page");
+  let target;
+  // New windows can be reported before their debugger target exists.
+  for (let attempt = 0; attempt < 40; attempt++) {
+    target = (await chrome.debugger.getTargets()).find(t => t.tabId === tab.id && t.type === "page");
+    if (target) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
   if (!target) throw new Error("工作页尚未就绪，请重新连接");
   targets.set(tab.id, target.id);
   return tab;
@@ -23,11 +29,29 @@ async function attach(tabId) {
   if (attached.has(tabId)) return;
   await chrome.debugger.attach({tabId}, '1.3');
   attached.add(tabId);
+  await chrome.debugger.sendCommand({tabId}, 'Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
+  await chrome.debugger.sendCommand({tabId}, 'Page.setWebLifecycleState', {state: 'active'}).catch(() => {});
   event('Target.attachedToTarget', {sessionId: sid(tabId), targetInfo: info(await chrome.tabs.get(tabId)), waitingForDebugger: false});
 }
 async function create(url = 'about:blank') {
   if (!allowedUrl(url)) throw new Error('只允许新建抖店工作页');
-  const tab = await remember(await chrome.tabs.create({url, active: false, ...(connectWindow == null ? {} : {windowId: connectWindow})}));
+  let tab;
+  if (workWindow != null) {
+    try { await chrome.windows.get(workWindow); }
+    catch (_) { workWindow = null; }
+  }
+  creating++;
+  try {
+  if (workWindow == null) {
+    // A normal window shares this profile's login, but activation of its tabs
+    // never changes the user's ordinary window. Do not focus the OS window.
+    const window = await chrome.windows.create({url, type: 'normal', focused: false, width: 1360, height: 1000});
+    workWindow = window.id;
+    tab = await remember(window.tabs[0]);
+  } else {
+    tab = await remember(await chrome.tabs.create({url, active: true, windowId: workWindow}));
+  }
+  } finally { creating--; }
   owned.add(tab.id);
   if (discover) event('Target.targetCreated', {targetInfo: info(tab)});
   if (autoAttach) await attach(tab.id);
@@ -52,6 +76,9 @@ async function command(message) {
     if (method === 'Page.navigate' && !allowedUrl(params.url)) throw new Error('禁止跳转到抖店以外的网站');
     if (method === 'Page.bringToFront') return {}; // Never steal focus from ordinary browsing.
     const target = sessionId.startsWith('library-tab-') ? {tabId} : {tabId, sessionId};
+    if (method === 'Page.enable' && !target.sessionId) {
+      await chrome.debugger.sendCommand(target, 'Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
+    }
     return await chrome.debugger.sendCommand(target, method, params) || {};
   }
   switch (method) {
@@ -100,7 +127,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 chrome.tabs.onRemoved.addListener(tabId => {
   if (!owned.delete(tabId)) return;
-  attached.delete(tabId);
+  if (attached.delete(tabId)) event('Target.detachedFromTarget', {sessionId: sid(tabId), targetId: targets.get(tabId)});
   event('Target.targetDestroyed', {targetId: targets.get(tabId)});
   targets.delete(tabId);
 });
@@ -109,7 +136,7 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 });
 // Track popups opened by a tool tab, without attaching to unrelated user tabs.
 chrome.tabs.onCreated.addListener(tab => {
-  if (!owned.has(tab.openerTabId)) return;
+  if (creating || (!owned.has(tab.openerTabId) && !(tab.windowId === workWindow && allowedUrl(tab.url || tab.pendingUrl)))) return;
   owned.add(tab.id);
   remember(tab).then(() => {
     if (discover) event('Target.targetCreated', {targetInfo: info(tab)});
@@ -124,7 +151,6 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         url.protocol !== 'http:' || Number(url.port) !== message.port || !/^[a-f0-9]{64}$/.test(message.token) ||
         url.hash.slice(1) !== message.token) throw new Error('连接来源无效，请从工具箱点击连接 Edge');
     if (socket) { clearInterval(heartbeat); socket.onclose = null; socket.close(); await disconnect(); }
-    connectWindow = sender.tab.windowId;
     socket = new WebSocket(`ws://127.0.0.1:${message.port}/extension/${message.token}`);
     await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = () => reject(new Error('工具箱未运行，请重新点击连接 Edge')); });
     socket.onmessage = async incoming => {

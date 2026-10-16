@@ -35,6 +35,7 @@ class DouyinPage:
         self.pending = []
         self.last_plan = None
         self.popups = []
+        self.creation_pages = set(session.context.pages)
         self.phase = "进入单商品创建流程"
 
     def check(self):
@@ -141,7 +142,7 @@ class DouyinPage:
 
     def ai_context(self, goal):
         return {
-            "完整流程": "进入单商品创建页 → 本地上传800主图前5张 → 生成前先清空商品详情并上传详情文件夹 → 网站推荐标题第一个 → 继续生成编辑页 → 替换3:4、白底、水洗标 → 填当前货号 → 48小时发货 → 按网站颜色从颜色文件夹选图上传到右侧图片框、尺码和体重 → 价格399、目标现货库存1000 → 校验 → 仅保存草稿",
+            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情只上传颜色文件夹单色图、排除多色对照图 → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 尺码及右侧备注体重xx-xx斤 → AI解析尺码图是本地图片上传入口 → 价格399、现货1000 → 校验 → 保存草稿并确认成功 → 新开下一款并关闭旧页",
             "当前阶段": self.phase,
             "本次目的": goal,
             "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
@@ -150,7 +151,7 @@ class DouyinPage:
             ),
         }
 
-    def control(self, text, root=None, allow_save=False):
+    def control(self, text, root=None, allow_save=False, allow_guidance=True):
         self.check()
         goal = text if isinstance(text, str) else text.pattern
         before, scope = page_key(self.page), scope_key(root)
@@ -174,7 +175,7 @@ class DouyinPage:
                 except Cancelled:
                     raise
                 except Exception as exc:
-                    if not self.guide:
+                    if not self.guide or not allow_guidance:
                         raise
                     self.log(f"自动定位未完成，转交用户指导：{goal}（{exc}）")
                     target, actions = self.guide.run(
@@ -428,7 +429,21 @@ class DouyinPage:
             raise ListingError("字段图片数量与当前货号资料不符。")
 
     def replace_images_in_page_order(self, fields):
-        entries = [(names, self.section(*names), paths) for names, paths in fields]
+        for names, paths in self.fields_in_page_order(fields):
+            self.replace_images(names, paths)
+
+    def fields_in_page_order(self, fields):
+        entries = []
+        for names, paths in fields:
+            try:
+                if not paths:
+                    self.log(f"跳过图片字段 {'/'.join(names)}：没有图片")
+                    continue
+                entries.append((names, self.section(*names), paths))
+            except Cancelled:
+                raise
+            except Exception as exc:
+                self.log(f"跳过图片字段 {'/'.join(names)}：{exc}")
         positions = self.page.evaluate(
             "selectors=>selectors.map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {y:r.y,x:r.x};})",
             [e[1] for e in entries],
@@ -439,7 +454,21 @@ class DouyinPage:
         ):
             names, _, paths = entries[index]
             # Uploads can remount adjacent React fields; resolve each fresh.
-            self.replace_images(names, paths)
+            yield names, paths
+
+    def dismiss_optional_dialogs(self):
+        for dialog in self.page.get_by_role("dialog").all():
+            if not dialog.is_visible():
+                continue
+            close = dialog.get_by_role(
+                "button", name=re.compile(r"^(取消|关闭|返回|Close)$", re.I)
+            )
+            if close.count() == 1:
+                close.click(timeout=2000)
+            else:
+                dialog.press("Escape", timeout=2000)
+            if dialog.is_visible():
+                raise ListingError("当前图片弹窗无法关闭，跳过本款以免误操作后续字段。")
 
     def reconcile_sizes_after_chart(self, sizes):
         desired = {normalize_size(r["name"]): r["weight"] for r in sizes}
@@ -454,14 +483,25 @@ class DouyinPage:
 
     def creation_state(self):
         # A navigation can advance directly, or open a new tool-owned tab.
-        for candidate in list(self.popups):
+        candidates = list(
+            dict.fromkeys(
+                self.popups
+                + [
+                    p
+                    for p in self.session.context.pages
+                    if p not in self.creation_pages
+                ]
+            )
+        )
+        for candidate in candidates:
             if (
                 not candidate.is_closed()
                 and "fxg.jinritemai.com" == urlparse(candidate.url).hostname
             ):
-                self.page = self.session.page = candidate
-                if hasattr(self.session, "own_page"):
-                    self.session.own_page(candidate)
+                if candidate is not self.page:
+                    self.page = self.session.page = candidate
+                    if hasattr(self.session, "own_page"):
+                        self.session.own_page(candidate)
         if self.page.is_closed():
             return "unknown"
         if urlparse(self.page.url).hostname != "fxg.jinritemai.com":
@@ -469,7 +509,10 @@ class DouyinPage:
         if self.dom("section", "主图3:4") or self.dom("section", "主图3：4"):
             self.editor_url = self.page.url
             return "editor"
-        if self.dom("recommendations"):
+        if self.dom("recommendations") or (
+            self.visible_control(re.compile(r"确认信息.*继续生成|^继续生成$"))
+            is not None
+        ):
             return "titles"
         if (
             self.visible_control(re.compile(r"^(本地上传|上传资料|上传文件|选择文件)$"))
@@ -725,6 +768,9 @@ class DouyinPage:
         raise ListingError("创建流程长时间未推进，请检查页面或重新指导。")
 
     def create(self, product):
+        if not 2 <= len(product.title.strip()) <= 60:
+            raise ListingError("请在货号旁填写2-60字商品标题。")
+        self.creation_pages = set(self.session.context.pages)
         self.session.goto(ENTRY_URL)
         self.popups = []
 
@@ -761,17 +807,23 @@ class DouyinPage:
                 )
             state = self.creation_state()
             if state == "titles":
-                self.phase = "生成前清空默认商品详情，上传本款详情图供网站识别颜色"
-                self.replace_images(("商品详情",), product.images["详情"])
-                self.details_prepared = True
+                self.phase = "生成前仅上传单色颜色图，填写用户标题"
+                if product.color_photos:
+                    self.replace_images(("商品详情",), product.color_photos)
                 self.wait(
-                    lambda: not self.dom("busy") and bool(self.dom("recommendations")),
-                    "详情上传后尚未生成可用的推荐标题",
+                    lambda: not self.dom("busy"),
+                    "颜色图片尚未上传完成",
                     timeout=90,
                 )
-                recommendation = self.dom("recommendations")[0]
-                self.page.locator(recommendation["selector"]).click()
-                self.phase = "已选择网站第一个推荐标题，需要继续生成商品编辑页"
+                title = self.page.get_by_placeholder(re.compile(r"标题|2.60|1.30"))
+                if title.count() != 1:
+                    title = self.control(
+                        "定位商品标题输入框，填写用户提供的标题，不选择AI推荐标题"
+                    )
+                title.fill(product.title.strip())
+                if title.input_value() != product.title.strip():
+                    raise ListingError("用户商品标题未正确填写。")
+                self.phase = "已填写用户标题，继续生成商品编辑页"
                 self.click(re.compile(r"^确认信息.*继续生成$|^继续生成$"))
                 self.navigation_wait(
                     lambda: self.creation_state() == "editor",
@@ -927,20 +979,29 @@ class DouyinPage:
                 analysis.colors.pop(color, None)
                 analysis.skipped_colors.append(color)
                 continue
-            field = record.get("photo") or record["row"]
-            self.clear(field)
-            trigger = self.page.locator(field) if record.get("photo") else None
-            if trigger is None and not self.dom("file_inputs", selector=field):
-                photo = self.dom("spec_photo_trigger", selector=record["row"])
-                trigger = (
-                    self.page.locator(photo)
-                    if photo
-                    else self.control(
-                        f"定位颜色 {color} 这一行备注右侧的图片框，悬停后选择本地上传；不要选颜色下拉框或删除按钮",
-                        self.page.locator(record["row"]),
+            try:
+                field = record.get("photo") or record["row"]
+                self.clear(field)
+                trigger = self.page.locator(field) if record.get("photo") else None
+                if trigger is None and not self.dom("file_inputs", selector=field):
+                    photo = self.dom("spec_photo_trigger", selector=record["row"])
+                    trigger = (
+                        self.page.locator(photo)
+                        if photo
+                        else self.control(
+                            f"定位颜色 {color} 这一行备注右侧的图片框，悬停后选择本地上传；不要选颜色下拉框或删除按钮",
+                            self.page.locator(record["row"]),
+                        )
                     )
-                )
-            self.upload(field, [path], trigger=trigger)
+                self.upload(field, [path], trigger=trigger)
+            except Cancelled:
+                raise
+            except Exception as exc:
+                self.log(f"跳过颜色 {color} 上传：{exc}")
+                analysis.colors.pop(color, None)
+                if color not in analysis.skipped_colors:
+                    analysis.skipped_colors.append(color)
+                self.dismiss_optional_dialogs()
 
     def set_sizes(self, sizes):
         desired = {normalize_size(row["name"]): row["weight"] for row in sizes}
@@ -998,30 +1059,68 @@ class DouyinPage:
         _, records = self.specs("尺码大小")
         if {normalize_size(row["name"]) for row in records} != set(desired):
             raise ListingError("页面尺码与识别结果不一致。")
-        for record in records:
-            weight = desired[normalize_size(record["name"])]
-            self.page.locator(record["note"]).fill(weight)
-            if self.page.locator(record["note"]).input_value() != weight:
-                raise ListingError("体重推荐写入失败。")
+        for name, weight in desired.items():
+            # Re-read after every write: controlled inputs may rebuild the row.
+            _, current = self.specs("尺码大小")
+            matches = [r for r in current if normalize_size(r["name"]) == name]
+            if len(matches) != 1:
+                raise ListingError(f"无法唯一定位尺码 {name} 右侧的备注框。")
+            note = self.page.locator(matches[0]["note"])
+            if note.input_value() != weight:
+                note.evaluate(
+                    """(e,value)=>{
+                    if(!/^(INPUT|TEXTAREA)$/.test(e.tagName)||e.disabled||e.readOnly||
+                       !/备注/.test([e.placeholder,e.getAttribute('aria-label')].join(' ')))
+                        throw new Error('不是可编辑的尺码备注框');
+                    const proto=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+                    Object.getOwnPropertyDescriptor(proto,'value').set.call(e,value);
+                    e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));
+                    e.dispatchEvent(new Event('change',{bubbles:true}));
+                    e.dispatchEvent(new FocusEvent('blur',{bubbles:true}));
+                }""",
+                    weight,
+                )
+            _, current = self.specs("尺码大小")
+            matches = [r for r in current if normalize_size(r["name"]) == name]
+            if (
+                len(matches) != 1
+                or self.page.locator(matches[0]["note"]).input_value() != weight
+            ):
+                raise ListingError(f"尺码 {name} 体重备注写入失败。")
+            self.log(f"{name} 体重备注：{weight or '留空（无明确数据）'}")
+
+    def try_parse_size_chart(self, paths, temp):
+        """The website helper is optional; verified size/weight notes are not."""
+        before = self.page.get_by_role("dialog").count()
+        try:
+            self.parse_size_chart(paths, temp)
+            return True
+        except Cancelled:
+            raise
+        except Exception as exc:
+            self.log(f"尺码图辅助上传未完成，保留已填写的尺码与体重备注，继续：{exc}")
+            # Only dismiss the dialog opened by this optional attempt.
+            dialogs = self.page.get_by_role("dialog")
+            for i in range(before, dialogs.count()):
+                dialog = dialogs.nth(i)
+                if not dialog.is_visible():
+                    continue
+                close = dialog.get_by_role(
+                    "button", name=re.compile(r"^(取消|关闭|返回|Close)$", re.I)
+                )
+                if close.count() == 1:
+                    close.click(timeout=2000)
+                else:
+                    dialog.press("Escape", timeout=2000)
+                if dialog.is_visible():
+                    raise ListingError(
+                        "网站尺码识别窗口无法关闭，请关闭该窗口后重试。"
+                    ) from exc
+            return False
 
     def parse_size_chart(self, paths, temp):
-        self.click(re.compile(r"^AI\s*解析尺码图$|^AI\s*识别尺码表$"))
-        self.wait(
-            lambda: any(
-                self.page.get_by_role("dialog").nth(i).is_visible()
-                for i in range(self.page.get_by_role("dialog").count())
-            ),
-            "网站尺码图识别窗口未打开",
-        )
-        dialogs = self.page.get_by_role("dialog")
-        dialog = next(
-            dialogs.nth(i)
-            for i in range(dialogs.count())
-            if dialogs.nth(i).is_visible()
-        )
-        selector = dialog.evaluate(
-            '(e)=>{e.dataset.glSize="active";return "[data-gl-size=active]"}'
-        )
+        if not paths:
+            raise ListingError("尺码文件夹没有可上传图片")
         if len(paths) > 1:
             images = []
             for path in paths:
@@ -1043,6 +1142,50 @@ class DouyinPage:
             merged = Path(temp) / "尺码合并.jpg"
             canvas.save(merged, quality=95)
             paths = [merged]
+        target = self.visible_control(
+            re.compile(r"(?:AI\s*)?(?:解析|识别)尺码(?:图|表|图片)")
+        )
+        if target is None:
+            target = self.control(
+                "定位尺码表区域的AI解析尺码图上传入口，上传尺码文件夹图片，不是跳转其他网站",
+                allow_guidance=False,
+            )
+        choosers = []
+
+        def capture_chooser(chooser):
+            choosers.append(chooser)
+
+        self.page.on("filechooser", capture_chooser)
+        try:
+            target.click(timeout=4000)
+            deadline = time.monotonic() + 3
+            dialog = None
+            while time.monotonic() < deadline:
+                self.check()
+                if choosers:
+                    choosers[0].set_files([str(p) for p in paths])
+                    self.wait(
+                        lambda: not self.dom("busy"), "尺码图尚未上传完成", timeout=60
+                    )
+                    self.log("尺码文件夹图片已上传到AI解析尺码图入口")
+                    return
+                visible = [
+                    d for d in self.page.get_by_role("dialog").all() if d.is_visible()
+                ]
+                if visible:
+                    dialog = visible[-1]
+                    break
+                self.page.wait_for_timeout(100)
+            if dialog is None:
+                selector = self.section("尺码表")
+                self.upload(selector, paths, trigger=target)
+                self.log("尺码文件夹图片已上传到尺码表区域")
+                return
+        finally:
+            self.page.remove_listener("filechooser", capture_chooser)
+        selector = dialog.evaluate(
+            '(e)=>{e.dataset.glSize="active";return "[data-gl-size=active]"}'
+        )
         self.upload(selector, paths)
         for text in ("开始识别", "识别", "解析", "确认识别"):
             button = dialog.get_by_role("button", name=text, exact=True)
@@ -1057,7 +1200,7 @@ class DouyinPage:
             )
             or not dialog.is_visible(),
             "网站尺码图识别未完成",
-            timeout=180,
+            timeout=60,
         )
         if dialog.is_visible():
             self.confirm_modal(("使用识别结果", "确认填入", "应用", "确定"))
