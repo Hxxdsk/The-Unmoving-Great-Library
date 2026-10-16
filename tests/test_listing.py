@@ -507,9 +507,12 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
                         body=FIXTURE.read_text() + popup_script,
                     ),
                 )
-                assert self.page.evaluate("[innerWidth, innerHeight]") == [1600, 1000]
-                with Image.open(io.BytesIO(self.page.screenshot())) as capture:
-                    assert capture.size == (1600, 1000)
+                natural_size = self.page.evaluate("[innerWidth, innerHeight]")
+                assert natural_size[0] > 0 and natural_size[1] > 0
+                with Image.open(
+                    io.BytesIO(self.page.screenshot(scale="css"))
+                ) as capture:
+                    assert capture.size == tuple(natural_size)
                 assert self.page.evaluate(
                     "[document.visibilityState, document.hasFocus()]"
                 ) == ["visible", True]
@@ -548,6 +551,12 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
                     )
                     assert "新建商品" in target.inner_text()
                     assert len(navigation.calls) == 1
+                    session.page.evaluate(
+                        "history.replaceState(null,'','/ffa/g/edit?recovery-test=unique');window.recoveryMarker='same-page'"
+                    )
+                    session.playwright.stop()
+                    session.reconnect_current_page()
+                    assert session.page.evaluate("window.recoveryMarker") == "same-page"
             except BaseException as exc:
                 errors.append(exc)
 

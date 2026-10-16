@@ -16,7 +16,7 @@ const chrome = {
     async create(options) {
       calls.push({op:'window-create',options});
       assert.equal(options.state,'normal'); assert.equal(options.focused,false);
-      assert.equal(options.width,1600); assert.equal(options.height,1100);
+      assert.equal(options.width,undefined); assert.equal(options.height,undefined);
       const tab={id:++seq,windowId:100,url:options.url};tabs.set(tab.id,tab);
       return {id:100,tabs:[tab]};
     },
@@ -60,7 +60,8 @@ vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'
   await vm.runInContext(`command({method:'Page.bringToFront',sessionId:'library-tab-${first.id}'})`,context);
   await vm.runInContext(`command({method:'Target.activateTarget',params:{targetId:'target-${first.id}'}})`,context);
   assert.equal(commands.length,commandsBefore,'focus commands must not be relayed');
-  assert(commands.some(c=>c.method==='Emulation.setDeviceMetricsOverride'&&c.params.width===1600&&c.params.height===1000&&c.params.mobile===false));
+  assert(!commands.some(c=>c.method==='Emulation.setDeviceMetricsOverride'));
+  assert(commands.some(c=>c.method==='Emulation.clearDeviceMetricsOverride'));
   assert(commands.some(c=>c.method==='Emulation.setFocusEmulationEnabled'&&c.params.enabled));
   assert(commands.some(c=>c.method==='Page.addScriptToEvaluateOnNewDocument'&&c.params.source.includes('window.focus')));
   const beforeBinding=calls.length;

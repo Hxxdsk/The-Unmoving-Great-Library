@@ -9,7 +9,7 @@ from PIL import Image, ImageOps
 from playwright.sync_api import Error as BrowserError
 
 from .models import ListingError, Cancelled, SaveUncertain
-from .browser import ENTRY_URL
+from .browser import ENTRY_URL, is_connection_failure
 from .vision import normalize_size
 from .page_ai import PageAI, FORBIDDEN
 from .spec_reader import read_rows, SCRIPT as SPEC_SNAPSHOT
@@ -470,6 +470,12 @@ class DouyinPage:
     def replace_images(self, names, paths):
         selector = self.section(*names)
         self.clear(selector)
+        # A reconnect may leave the same FileList selected after thumbnails were
+        # cleared. Reset it so selecting identical files still fires change.
+        for item in self.dom("file_inputs", selector=selector) or []:
+            control = self.page.locator(item["selector"])
+            if control.evaluate("e => !!e.files?.length"):
+                control.set_input_files([])
         self.upload(selector, paths)
         if self.photo_count(selector) != len(paths):
             raise ListingError("字段图片数量与当前货号资料不符。")
@@ -1349,6 +1355,8 @@ class DouyinPage:
             except Cancelled:
                 raise
             except Exception as exc:
+                if is_connection_failure(exc):
+                    raise
                 self.log(f"跳过颜色 {color} 上传：{exc}")
                 analysis.colors.pop(color, None)
                 if color not in analysis.skipped_colors:

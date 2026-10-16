@@ -172,7 +172,7 @@ def test_size_chart_direct_local_upload_does_not_require_a_dialog(tmp_path, sess
         )
         page = DouyinPage(s, threading.Event(), log=print)
         assert page.try_parse_size_chart(product.images["尺码"], tmp_path)
-        assert s.page.evaluate("window.uploadedSize") == "1.png"
+        assert s.page.evaluate("window.uploadedSize") == product.images["尺码"][0].name
 
 
 def test_optional_size_chart_failure_continues_without_human_wait(

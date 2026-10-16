@@ -32,7 +32,7 @@ const noWindowFocus = `(() => {
   });
 })();`;
 
-let workBounds = {width: 1600, height: 1100};
+let workBounds = {};
 let workWindow = null, latestWorkTab = null, epoch = null, creating = 0, detaching = Promise.resolve();
 const owned = new Set(), attached = new Set(), children = new Map(), targets = new Map();
 const tabForTarget = targetId => [...targets].find(([tabId, id]) => id === targetId)?.[0];
@@ -63,8 +63,8 @@ async function attach(tabId) {
   await chrome.debugger.attach({tabId}, '1.3');
   attached.add(tabId);
   await chrome.debugger.sendCommand({tabId}, 'Runtime.addBinding', {name: '__greatLibraryOpenBackground'});
-  // Keep a full desktop layout even if OS visibility or display scaling changes.
-  await chrome.debugger.sendCommand({tabId}, 'Emulation.setDeviceMetricsOverride', {width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false, screenWidth: 1600, screenHeight: 1000}).catch(() => {});
+  // Remove any older session's forced viewport; use the native browser layout.
+  await chrome.debugger.sendCommand({tabId}, 'Emulation.clearDeviceMetricsOverride').catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Page.addScriptToEvaluateOnNewDocument', {source: noWindowFocus}).catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Runtime.evaluate', {expression: noWindowFocus}).catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
@@ -234,10 +234,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         url.hash.slice(1) !== message.token) throw new Error('连接来源无效，请从工具箱点击连接 Edge');
     try {
       const outer = await chrome.windows.get(sender.tab.windowId);
-      workBounds = {width: Math.max(1600, outer.width || 0), height: Math.max(1000, outer.height || 1100)};
+      workBounds = {};
+      for (const key of ['width', 'height']) if (Number.isFinite(outer[key]) && outer[key] > 0) workBounds[key] = outer[key];
       if (Number.isFinite(outer.left)) workBounds.left = outer.left;
       if (Number.isFinite(outer.top)) workBounds.top = outer.top;
-    } catch (_) { /* Keep desktop defaults if source window metadata is unavailable. */ }
+    } catch (_) { /* Use browser defaults if source window metadata is unavailable. */ }
     if (socket) { clearInterval(heartbeat); socket.onclose = null; socket.close(); await disconnect(); }
     socket = new WebSocket(`ws://127.0.0.1:${message.port}/extension/${message.token}`);
     await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = () => reject(new Error('工具箱未运行，请重新点击连接 Edge')); });

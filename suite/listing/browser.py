@@ -9,6 +9,20 @@ from .models import ListingError
 ENTRY_URL = "https://fxg.jinritemai.com/ffa/g/list?sov_goodsType=0&tab=all"
 
 
+def is_connection_failure(exc):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if re.search(
+            r"Connection closed|reading from the driver|browser has disconnected|Browser closed|Browser has been closed",
+            str(exc),
+            re.I,
+        ):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 class EdgeSession:
     """Control extension-owned tabs inside the user's ordinary Edge session."""
 
@@ -65,6 +79,48 @@ class EdgeSession:
                 + "。若扩展通道显示已连接，请在 edge://extensions 重新加载当前程序目录的连接扩展，再重新连接；无需关闭 Edge。"
             ) from exc
 
+    def reconnect_current_page(self):
+        """Restart the driver and attach to exactly the same surviving editor."""
+        from playwright.sync_api import sync_playwright
+        from .models import Cancelled
+
+        previous_url = self.page.url
+        if urlparse(previous_url).hostname != "fxg.jinritemai.com":
+            raise ListingError("原工作页不是抖店页面，未自动恢复")
+        try:
+            self.close()
+        except Exception:
+            self.playwright = None
+        self.page = self.context = self.browser = None
+        for attempt in range(3):
+            if self.cancel.is_set():
+                raise Cancelled("已停止驱动重连")
+            try:
+                self.playwright = sync_playwright().start()
+                self.browser = self.playwright.chromium.connect_over_cdp(
+                    self.config.endpoint, timeout=15000
+                )
+                self.context = self.browser.contexts[0]
+                self.context.set_default_timeout(12000)
+                candidates = [p for p in self.context.pages if p.url == previous_url]
+                if len(candidates) != 1:
+                    raise ListingError("无法唯一确认原编辑页，未新建或跳转商品")
+                self.page = candidates[0]
+                self.page.evaluate("document.readyState")
+                return self.page
+            except ListingError:
+                self.close()
+                raise
+            except Exception as exc:
+                try:
+                    self.close()
+                except Exception:
+                    self.playwright = None
+                if attempt == 2:
+                    raise ListingError("原编辑页驱动重连失败，请重新连接 Edge") from exc
+                if self.cancel.wait(0.5):
+                    raise Cancelled("已停止驱动重连")
+
     def goto(self, url):
         parsed = urlparse(url)
         if parsed.scheme != "https" or parsed.hostname != "fxg.jinritemai.com":
@@ -99,9 +155,15 @@ class EdgeSession:
         return "已连接 Edge 的专用操作页，复用当前登录。"
 
     def close(self):
-        if self.playwright:
-            self.playwright.stop()
-            self.playwright = None
+        driver, self.playwright = self.playwright, None
+        if driver:
+            try:
+                driver.stop()
+            except Exception as exc:
+                if not is_connection_failure(exc) and "Event loop is closed" not in str(
+                    exc
+                ):
+                    raise
 
     def __exit__(self, *_):
         self.close()

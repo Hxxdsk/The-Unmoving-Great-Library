@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from .models import Journal, ListingError, Cancelled, SaveUncertain
-from .browser import EdgeSession
+from .browser import EdgeSession, is_connection_failure
 from .site import DouyinPage
 from .vision import analyze, prepare_color_sources
 
@@ -93,6 +93,41 @@ class BatchRunner:
                         guide=self.guide,
                     )
 
+                    driver_recoveries = 0
+
+                    def replace_field(names, paths):
+                        nonlocal driver_recoveries
+                        try:
+                            return page.replace_images(names, paths)
+                        except Exception as exc:
+                            if not is_connection_failure(exc):
+                                raise
+                            if driver_recoveries or not hasattr(
+                                session, "reconnect_current_page"
+                            ):
+                                raise
+                            driver_recoveries += 1
+                            page.log(
+                                "浏览器驱动连接已断开，尝试一次重连原编辑页；不重新创建商品"
+                            )
+                            try:
+                                session.reconnect_current_page()
+                            except Cancelled:
+                                raise
+                            except Exception as recovery:
+                                raise ListingError(
+                                    "驱动重连未完成：" + str(recovery)
+                                ) from exc
+                            page.page = session.page
+                            page.pending.clear()
+                            page.last_plan = None
+                            page.spec_cache.clear()
+                            page.spec_layouts.clear()
+                            page.popups = []
+                            page.creation_pages = set(session.context.pages)
+                            page.log("已重连原编辑页，重新读取并替换当前图片字段")
+                        return page.replace_images(names, paths)
+
                     def advance(name, percent):
                         nonlocal stage
                         page.confirm_memory()
@@ -124,22 +159,26 @@ class BatchRunner:
                                 fields.append((("商品详情",), product.images["详情"]))
                             for names, paths in page.fields_in_page_order(fields):
                                 try:
-                                    page.replace_images(names, paths)
+                                    replace_field(names, paths)
                                 except Cancelled:
                                     raise
                                 except Exception as exc:
+                                    if is_connection_failure(exc):
+                                        raise
                                     page.log(f"跳过图片字段 {'/'.join(names)}：{exc}")
                                     page.dismiss_optional_dialogs()
                             advance("水洗标与货号", 40)
                             page.tab("属性信息")
                             try:
-                                page.replace_images(
+                                replace_field(
                                     ("水洗标/吊牌图", "水洗标/吊牌图片"),
                                     product.images["水洗标"],
                                 )
                             except Cancelled:
                                 raise
                             except Exception as exc:
+                                if is_connection_failure(exc):
+                                    raise
                                 page.log(f"跳过水洗标图片：{exc}")
                                 page.dismiss_optional_dialogs()
                             sku_control = page.fill_sku(product.sku)
@@ -210,7 +249,15 @@ class BatchRunner:
                         )
                         self.report(product.sku, "待核对", str(exc), 97)
                         results.append((product.sku, "待核对"))
+                        if is_connection_failure(exc):
+                            break
                     except Exception as exc:
+                        disconnected = is_connection_failure(exc)
+                        if disconnected:
+                            exc = ListingError(
+                                "浏览器驱动连接已失效，已保留编辑现场并停止本批次；请重新连接 Edge。原错误："
+                                + str(exc)
+                            )
                         status = (
                             "cancelled"
                             if isinstance(exc, Cancelled) or self.cancel.is_set()
@@ -230,6 +277,6 @@ class BatchRunner:
                             0,
                         )
                         results.append((product.sku, "失败"))
-                        if self.cancel.is_set():
+                        if self.cancel.is_set() or disconnected:
                             break
             return results
