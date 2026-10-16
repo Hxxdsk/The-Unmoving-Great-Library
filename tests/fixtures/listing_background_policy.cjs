@@ -14,15 +14,16 @@ const chrome = {
   windows: {
     async create(options) {
       calls.push({op:'window-create',options});
-      assert.equal(options.state,'maximized'); assert.equal(options.focused,false);
-      assert.equal(options.width,undefined); assert.equal(options.height,undefined);
+      assert.equal(options.state,'normal'); assert.equal(options.focused,false);
+      assert.equal(options.width,1600); assert.equal(options.height,1100);
       const tab={id:++seq,windowId:100,url:options.url};tabs.set(tab.id,tab);
       return {id:100,tabs:[tab]};
     },
     async get(id) {assert.equal(id,100);return {id};},
     async update(id,options) {
       assert.equal(id,100,'ordinary windows must never be resized or focused');
-      assert.equal(options.state,'maximized');assert.equal(options.focused,false);assert.equal(Object.keys(options).sort().join(','),'focused,state');
+      assert.equal(options.state,'normal');assert.equal(options.focused,false);
+      assert.equal(options.width,1600);assert.equal(options.height,1100);
       calls.push({op:'window-update',id});return {id,...options};
     }
   },

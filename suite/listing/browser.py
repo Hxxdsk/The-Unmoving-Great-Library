@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from urllib.parse import urlparse
+import re
 
 from .bridge import BrowserConfig
 from .models import ListingError
@@ -56,8 +57,12 @@ class EdgeSession:
             return self
         except Exception as exc:
             self.close()
+            detail = re.sub(r"[a-fA-F0-9]{64}", "[连接令牌已隐藏]", str(exc))
+            detail = detail.replace(self.config.endpoint, "[本机连接地址]")[:700]
             raise ListingError(
-                "未连接 Edge。请点击“连接 Edge”；首次使用按连接页说明加载扩展，无需退出浏览器。"
+                "Edge 操作页初始化失败："
+                + detail
+                + "。若扩展通道显示已连接，请在 edge://extensions 重新加载当前程序目录的连接扩展，再重新连接；无需关闭 Edge。"
             ) from exc
 
     def goto(self, url):

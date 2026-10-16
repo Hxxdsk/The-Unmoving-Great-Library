@@ -299,3 +299,22 @@ def test_extension_keeps_new_work_pages_in_background():
         check=True,
     )
     assert "focus suppression: passed" in result.stdout
+
+
+def test_edge_initialization_error_retains_cause_and_hides_token():
+    from unittest.mock import patch
+    from suite.listing.browser import EdgeSession
+
+    token = "a" * 64
+    config = BrowserConfig("ws://127.0.0.1:12345/cdp/" + token)
+    with patch("playwright.sync_api.sync_playwright") as factory:
+        driver = factory.return_value.start.return_value
+        driver.chromium.connect_over_cdp.side_effect = RuntimeError(
+            "Cannot create an unfocused maximized window: " + config.endpoint
+        )
+        with pytest.raises(ListingError) as error:
+            EdgeSession(config, threading.Event()).__enter__()
+        assert "Cannot create an unfocused maximized window" in str(error.value)
+        assert token not in str(error.value)
+        assert "重新加载" in str(error.value)
+        driver.stop.assert_called_once()

@@ -261,7 +261,7 @@ class ListingWindow(QMainWindow):
         self.connection_timer = QTimer(self)
         self.connection_timer.timeout.connect(
             lambda: self.connection_status.setText(
-                "Edge 已连接" if self.bridge.connected.is_set() else "尚未连接 Edge"
+                "扩展通道已连接" if self.bridge.connected.is_set() else "尚未连接 Edge"
             )
         )
         self.connection_timer.start(1000)

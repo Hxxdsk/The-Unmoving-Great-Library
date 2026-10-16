@@ -28,8 +28,15 @@ const info = tab => ({targetId: targets.get(tab.id), browserContextId: 'edge-def
 async function keepBackgroundWindow() {
   if (workWindow == null) return;
   const window = await chrome.windows.get(workWindow);
-  if (window.state !== 'maximized' || window.focused) {
-    await chrome.windows.update(workWindow, {state: 'maximized', focused: false});
+  // Chromium rejects maximized/fullscreen combined with focused:false.
+  // A normal background window plus CDP desktop metrics keeps recognition full.
+  if (window.state === 'minimized' || window.width < 1600 || window.height < 1100) {
+    try {
+      await chrome.windows.update(workWindow, {state: 'normal', focused: false, width: 1600, height: 1100});
+    } catch (error) {
+      // A display/OS size restriction must not prevent attaching to a valid tab.
+      console.warn('后台窗口尺寸未调整，继续使用完整渲染视口：', error.message);
+    }
   }
 }
 async function attach(tabId) {
@@ -55,8 +62,8 @@ async function create(url = 'about:blank') {
   creating++;
   try {
   if (workWindow == null) {
-    // Render at full size behind the current window; do not minimize or focus.
-    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'maximized'});
+    // Use a background normal window: maximizing an unfocused window is invalid.
+    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'normal', width: 1600, height: 1100});
     workWindow = window.id;
     tab = await remember(window.tabs[0]);
   } else {
@@ -162,7 +169,7 @@ chrome.tabs.onCreated.addListener(tab => {
       }
       await keepBackgroundWindow();
     } catch (error) {
-      console.warn('工作子页暂未恢复后台最大化：', error.message);
+      console.warn('工作子页暂未恢复后台窗口：', error.message);
     }
     await remember(tab);
     if (discover) event('Target.targetCreated', {targetInfo: info(await chrome.tabs.get(tab.id))});
