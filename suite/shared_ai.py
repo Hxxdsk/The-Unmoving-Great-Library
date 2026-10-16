@@ -350,6 +350,7 @@ class RotatingGeminiClient(GeminiClient):
             client = GeminiClient(
                 entry["key"], self.model, self.cancel, retry_rate_limit=False
             )
+            client.log = self.log
             try:
                 return client._request(method, path, payload)
             except GeminiHTTPError as exc:

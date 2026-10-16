@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import io
+import ssl
+import http.client
 import json
 import math
 import re
@@ -131,6 +133,7 @@ class GeminiClient:
         self.model = model
         self.cancel = cancel if cancel is not None else threading.Event()
         self.retry_rate_limit = retry_rate_limit
+        self.log = lambda _: None
         if not self.api_key:
             raise GeminiError("请先输入 Gemini API Key。")
         if any(ord(character) < 33 or ord(character) > 126 for character in self.api_key):
@@ -177,9 +180,15 @@ class GeminiClient:
                     exc.code,
                     retry_delay(exc.headers, error),
                 ) from None
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead) as exc:
+                cause = getattr(exc, "reason", exc)
+                if not isinstance(cause, ssl.SSLCertVerificationError) and attempt < 2:
+                    self.log(f"Gemini 连接中断，正在重试（{attempt + 1}/2）")
+                    if self.cancel.wait(2 ** attempt):
+                        self.check_cancel()
+                    continue
                 reason = str(getattr(exc, "reason", exc))[:300].replace(self.api_key, "[已隐藏]")
-                raise GeminiError(f"无法连接 Gemini：{reason}。检查网络能否访问 generativelanguage.googleapis.com。") from None
+                raise GeminiError(f"无法连接 Gemini：{reason}。请检查当前网络或代理能否访问 generativelanguage.googleapis.com:443；SSL EOF 通常表示代理或网络中途断开，可更换稳定线路后重试；证书验证错误请修复系统证书或代理证书。") from None
             except (ValueError, TypeError):
                 raise GeminiError("Gemini API 返回无效 JSON。") from None
         raise GeminiError("Gemini 请求失败。")

@@ -42,3 +42,24 @@ def test_no_recommendations_reports_failure_before_save(session):
         with pytest.raises(ListingError, match="推荐未加载"):
             page.select_recommended_title()
         assert not s.page.evaluate("Boolean(window.saved)")
+
+
+def test_animated_first_title_uses_guarded_fresh_click(session):
+    with session as s:
+        s.check_login()
+        s.page.evaluate("editor()")
+        s.page.add_style_tag(content="""
+            @keyframes moveTitle {from{transform:translateX(0)}to{transform:translateX(12px)}}
+            .title-popover>div:first-child {animation:moveTitle .16s linear infinite alternate}
+        """)
+        messages = []
+        page = DouyinPage(s, threading.Event(), log=messages.append)
+        page.select_recommended_title()
+        assert (
+            s.page.locator("#final-title").input_value()
+            == "网站推荐的第一个完整商品标题"
+        )
+        assert any("重新定位第一项" in message for message in messages)
+        assert [e["event"] for e in s.page.evaluate("window.audit")] == [
+            "recommended-final-title"
+        ]

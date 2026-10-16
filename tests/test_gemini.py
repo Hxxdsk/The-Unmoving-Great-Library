@@ -123,3 +123,27 @@ def test_multimodal_pairing_ignores_filename_order_and_commits_atomically(tmp_pa
         with pytest.raises(GeminiError):
             client.analyze_style(style, force=True, cache=cache)
     assert style.selections == {"黑色": "2.jpg", "月光蓝": "1.jpg"}
+
+
+def test_ssl_eof_retries_with_identical_payload_and_logs_recovery():
+    import ssl
+
+    client = GeminiClient("test-key")
+    messages = []
+    client.log = messages.append
+    error = urllib.error.URLError(ssl.SSLEOFError("unexpected EOF"))
+    with patch("urllib.request.urlopen", side_effect=[error, io.BytesIO(b'{"ok":true}')]) as request, patch.object(client.cancel, "wait", return_value=False):
+        assert client._request("POST", "/models/test:generateContent", {"contents": ["same"]}) == {"ok": True}
+    assert request.call_count == 2
+    assert request.call_args_list[0].args[0].data == request.call_args_list[1].args[0].data
+    assert any("重试" in message for message in messages)
+
+
+def test_certificate_failure_does_not_retry_or_disable_verification():
+    import ssl
+
+    client = GeminiClient("test-key")
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError(ssl.SSLCertVerificationError("bad certificate"))) as request:
+        with pytest.raises(GeminiError, match="证书"):
+            client._request("GET", "/models")
+    assert request.call_count == 1

@@ -1523,7 +1523,6 @@ class DouyinPage:
         )
         first = self.dom("first_recommended_title", selector=fields["input"])
         previous = self.page.locator(fields["input"]).input_value().strip()
-        self.click_field(self.page.locator(first["selector"]))
 
         def selected():
             current = self.dom("title_recommendation")
@@ -1539,7 +1538,58 @@ class DouyinPage:
                 and not self.dom("first_recommended_title", selector=current["input"])
             )
 
-        self.wait(selected, "第一个推荐标题尚未应用，未保存草稿。", timeout=6)
+        for attempt in range(3):
+            if selected():
+                break
+            fields = self.dom("title_recommendation")
+            current = self.dom("first_recommended_title", selector=fields["input"])
+            if not current:
+                self.click_field(self.page.locator(fields["button"]))
+                self.wait(
+                    lambda: self.dom(
+                        "first_recommended_title", selector=fields["input"]
+                    ),
+                    "商品标题推荐未加载，未保存草稿。",
+                    timeout=8,
+                )
+                current = self.dom("first_recommended_title", selector=fields["input"])
+            first = current
+            try:
+                self.click_field(self.page.locator(first["selector"]))
+            except Cancelled:
+                raise
+            except Exception:
+                if selected():
+                    break
+                # Re-read the current first item after animation/React remount.
+                fresh = self.dom("first_recommended_title", selector=fields["input"])
+                if not fresh:
+                    continue
+                first = fresh
+                target = self.page.locator(first["selector"])
+                # Playwright's scroll helper also waits for stability. The item
+                # is already visible; use native scrolling then verify hit area.
+                target.evaluate(
+                    "e=>e.scrollIntoView({block:'nearest',inline:'nearest'})"
+                )
+                guard = self.dom("interaction_guard", selector=first["selector"]) or {}
+                if guard.get("close"):
+                    self.page.locator(guard["close"]).click(timeout=1500)
+                    continue
+                if not guard.get("point"):
+                    raise ListingError("推荐标题被其他浮层遮挡，未穿透点击。")
+                self.log("推荐标题正在重绘，重新定位第一项并触发其点击")
+                target.dispatch_event("click", timeout=1500)
+            try:
+                self.wait(selected, "第一个推荐标题尚未应用", timeout=3)
+                break
+            except Cancelled:
+                raise
+            except ListingError:
+                if attempt == 2:
+                    raise
+        if not selected():
+            raise ListingError("第一个推荐标题尚未应用，未保存草稿。")
         self.page.locator(self.dom("title_recommendation")["input"]).blur()
         self.log("已选择网站 AI 推荐的第一个商品标题，准备保存草稿")
 

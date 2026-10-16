@@ -117,3 +117,60 @@ def test_wide_size_chart_includes_labeled_lower_table_details(tmp_path):
     parts = size_chart_parts(path)
     assert len([p for p in parts if "inlineData" in p]) == 3
     assert sum("同一尺码图下半部" in p.get("text", "") for p in parts) == 2
+
+
+def test_missing_weight_is_re_read_from_chart_header_unit_only(tmp_path):
+    from suite.listing.vision import recover_size_weights
+
+    product = make_product(tmp_path)
+    rows = [
+        dict(name=n, weight=w, confidence=0.99, needs_review=False)
+        for n, w in [("S", ""), ("M", "100-120斤"), ("L", "120-140")]
+    ]
+
+    class WeightClient:
+        def generate(self, parts, schema):
+            assert set(schema["properties"]) == {"sizes"}
+            assert "表头单位" in parts[0]["text"]
+            assert any("inlineData" in p for p in parts)
+            return {
+                "sizes": [
+                    dict(
+                        name="S",
+                        weight="42.5-50",
+                        unit="kg",
+                        confidence=0.99,
+                        needs_review=False,
+                    ),
+                    dict(
+                        name="L",
+                        weight="120-140",
+                        unit="斤",
+                        confidence=0.99,
+                        needs_review=False,
+                    ),
+                    dict(
+                        name="M",
+                        weight="200-220",
+                        unit="斤",
+                        confidence=0.99,
+                        needs_review=False,
+                    ),
+                    dict(
+                        name="XL",
+                        weight="140-160",
+                        unit="斤",
+                        confidence=0.99,
+                        needs_review=False,
+                    ),
+                ]
+            }
+
+    result = recover_size_weights(
+        WeightClient(), product.images["尺码"], rows, threading.Event(), lambda _: None
+    )
+    assert {r["name"]: r["weight"] for r in result} == {
+        "S": "85-100斤",
+        "M": "100-120斤",
+        "L": "120-140斤",
+    }
