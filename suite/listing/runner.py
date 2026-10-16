@@ -173,6 +173,8 @@ class BatchRunner:
                                 self.price,
                                 self.inventory,
                             )
+                            advance("选择网站推荐标题", 95)
+                            page.select_recommended_title()
                             if self.cancel.is_set():
                                 raise Cancelled("已停止，未点击保存草稿")
                             journal.update(

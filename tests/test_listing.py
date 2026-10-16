@@ -189,6 +189,13 @@ def test_full_browser_workflow_preserves_sku_replaces_details_and_only_saves_dra
     )
     saves = [e for e in session.audit if e["event"] == "save"]
     assert len(saves) == 1 and saves[0]["sku"] == product.sku
+    assert saves[0]["title"] == "网站推荐的第一个完整商品标题"
+    events = [e["event"] for e in session.audit]
+    assert (
+        events.index("batch")
+        < events.index("recommended-final-title")
+        < events.index("save")
+    )
     assert saves[0]["details"] == ["1.png", "2.png"]
     assert set(map(float, saves[0]["price"])) == {399}
     assert set(map(int, saves[0]["stock"])) == {1000}

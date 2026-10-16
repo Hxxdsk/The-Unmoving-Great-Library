@@ -39,6 +39,44 @@
   }
   const root = selector ? document.querySelector(selector) : document.body;
   if (!root) return null;
+  if(op==='title_recommendation'){
+    const eligible=e=>visible(e)&&!e.closest('aside,[role=dialog]');
+    const labels=[...root.querySelectorAll('label,span,div,p')].filter(e=>eligible(e)&&norm(e.innerText)==='商品标题')
+      .sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
+    for(const heading of labels){
+      for(let box=heading.parentElement;box&&box!==document.body;box=box.parentElement){
+        const inputs=[...box.querySelectorAll('input:not([type=checkbox]):not([type=hidden]),textarea')].filter(e=>eligible(e)&&!e.disabled&&!e.readOnly);
+        const buttons=[...box.querySelectorAll('button,a,span,div,[role=button]')].filter(e=>eligible(e)&&/^[✦✨星]*AI推荐$/i.test(norm(e.innerText)))
+          .sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
+        if(inputs.length===1&&buttons.length){return {input:mark(inputs[0]),button:mark(buttons[0]),field:mark(box)};}
+        if(inputs.length>2)break;
+      }
+    }
+    return null;
+  }
+  if(op==='first_recommended_title'){
+    const r=root.getBoundingClientRect();
+    const overlays=[...document.querySelectorAll('[role=listbox],[role=menu],[class*=popover],[class*=Popover],[class*=dropdown],[class*=Dropdown],[class*=popup],[class*=Popup]')]
+      .filter(e=>visible(e)&&!e.closest('aside'));
+    // Some versions use a plain portal containing a "重新生成" button.
+    for(const e of document.querySelectorAll('button,span,div')){
+      if(visible(e)&&/^(AI)?重新生成$/.test(norm(e.innerText))&&e.children.length===0){
+        const button=e.closest('button')||e;
+        if(button.parentElement)overlays.push(button.parentElement);
+      }
+    }
+    const items=[];
+    for(const overlay of overlays){
+      for(const e of overlay.querySelectorAll('[role=option],[role=menuitem],li,p,span,div,button,a')){
+        const text=(e.innerText||'').trim(),b=e.getBoundingClientRect();
+        if(!visible(e)||e.children.length||text.length<5||/重新生成|加载中|生成中/.test(text)||e.closest('aside'))continue;
+        if(b.top<r.bottom-4||b.top>r.bottom+450||b.left<r.left-30||b.right>r.right+100)continue;
+        items.push({e,text,b});
+      }
+    }
+    items.sort((a,b)=>a.b.top-b.b.top||a.b.left-b.b.left);
+    return items.length?{selector:mark(items[0].e),text:items[0].text}:null;
+  }
   if(op==='color_spec_order'){
     const eligible=e=>visible(e)&&!e.closest('aside,[role=dialog],[role=listbox]');
     const headings=[...root.querySelectorAll('label,span,div,p,h3,h4')].filter(e=>eligible(e)&&/^(颜色分类|尺码大小)$/.test(norm(e.innerText)))

@@ -143,7 +143,7 @@ class DouyinPage:
 
     def ai_context(self, goal):
         return {
-            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情上传整个颜色文件夹（包含多色对照图） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 使用颜色目录中尺码图识别已有尺码的右侧备注体重xx-xx斤，不再上传尺码图 → 价格399、现货1000 → 校验 → 保存草稿并确认成功 → 新开下一款并关闭旧页",
+            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情上传整个颜色文件夹（包含多色对照图） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 使用颜色目录中尺码图识别已有尺码的右侧备注体重xx-xx斤，不再上传尺码图 → 价格399、现货1000 → 校验 → 返回顶部，选择商品标题AI推荐下拉框的第一个标题 → 保存草稿并确认成功 → 新开下一款并关闭旧页",
             "当前阶段": self.phase,
             "本次目的": goal,
             "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
@@ -1499,6 +1499,49 @@ class DouyinPage:
         radio = self.page.get_by_role("radio", name="48小时", exact=True)
         if radio.count() != 1 or not radio.is_checked():
             raise ListingError("发货时间未确认是 48 小时。")
+
+    def select_recommended_title(self):
+        self.tab("图文信息")
+        # The editor can scroll inside a layout container rather than window.
+        self.page.evaluate("""() => {
+            window.scrollTo(0, 0);
+            for (const e of document.querySelectorAll('main,[class*=content],[class*=Content]')) {
+                if (e.scrollHeight > e.clientHeight) e.scrollTop = 0;
+            }
+        }""")
+        fields = self.dom("title_recommendation")
+        if not fields:
+            self.tab("属性信息")
+            fields = self.dom("title_recommendation")
+        if not fields:
+            raise ListingError("未找到商品标题旁的 AI 推荐按钮，未保存草稿。")
+        self.click_field(self.page.locator(fields["button"]))
+        self.wait(
+            lambda: self.dom("first_recommended_title", selector=fields["input"]),
+            "商品标题推荐未加载出可选标题，未保存草稿。",
+            timeout=20,
+        )
+        first = self.dom("first_recommended_title", selector=fields["input"])
+        previous = self.page.locator(fields["input"]).input_value().strip()
+        self.click_field(self.page.locator(first["selector"]))
+
+        def selected():
+            current = self.dom("title_recommendation")
+            if not current:
+                return False
+            value = self.page.locator(current["input"]).input_value().strip()
+            same_title = re.sub(r"\s+", "", first["text"]).endswith(
+                re.sub(r"\s+", "", value)
+            )
+            return (
+                bool(value)
+                and (value != previous or same_title)
+                and not self.dom("first_recommended_title", selector=current["input"])
+            )
+
+        self.wait(selected, "第一个推荐标题尚未应用，未保存草稿。", timeout=6)
+        self.page.locator(self.dom("title_recommendation")["input"]).blur()
+        self.log("已选择网站 AI 推荐的第一个商品标题，准备保存草稿")
 
     def save_draft(self):
         self.check()
