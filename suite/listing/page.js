@@ -39,6 +39,24 @@
   }
   const root = selector ? document.querySelector(selector) : document.body;
   if (!root) return null;
+  if(op==='color_spec_order'){
+    const eligible=e=>visible(e)&&!e.closest('aside,[role=dialog],[role=listbox]');
+    const headings=[...root.querySelectorAll('label,span,div,p,h3,h4')].filter(e=>eligible(e)&&/^(颜色分类|尺码大小)$/.test(norm(e.innerText)))
+      .sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
+    const color=headings.find(e=>norm(e.innerText)==='颜色分类');
+    if(!color)return null;
+    const r=color.getBoundingClientRect();
+    const before=headings.filter(e=>norm(e.innerText)==='尺码大小'&&e.getBoundingClientRect().bottom<=r.top+2).length;
+    // Only the color header's right-hand action, never a size or SKU row action.
+    const moves=[...root.querySelectorAll('button,a,span,div,[role=button]')].filter(e=>{
+      if(!eligible(e)||norm(e.innerText)!=='上移')return false;
+      const b=e.getBoundingClientRect();
+      return b.left>=r.right&&Math.abs(b.top+b.height/2-r.top-r.height/2)<=24;
+    }).sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
+    const up=moves[0];
+    const disabled=up&&!!up.closest('[disabled],[aria-disabled=true],[class*=disabled],[class*=Disabled]');
+    return {first:up?disabled:before===0,before,top:r.top+window.scrollY,move:up&&!disabled?mark(up):null};
+  }
   if(op==='batch_price_stock'){
     const outside=e=>!e.closest('aside,[role=dialog],thead,tbody,[role=table] [role=row],[role=grid] [role=row]');
     const prices=[...root.querySelectorAll('input')].filter(e=>visible(e)&&outside(e)&&norm(e.placeholder||e.getAttribute('aria-label'))==='价格');

@@ -148,6 +148,7 @@ class BatchRunner:
                             sku_control = page.fill_sku(product.sku)
                             advance("识别颜色正面图、尺码与体重", 50)
                             page.ship_48h()
+                            page.ensure_color_first()
                             _, colors = page.specs("颜色分类")
                             analysis = analyze(
                                 self.client,

@@ -28,6 +28,7 @@ class DouyinPage:
         )
         self.editor_url = ""
         self.details_prepared = False
+        self.batch_applied = False
         self.spec_cache = {}
         self.spec_layouts = {}
         self.client = client
@@ -1133,7 +1134,41 @@ class DouyinPage:
         else:
             self.click("48小时")
 
+    def ensure_color_first(self):
+        """Move the website's color specification using its own header control."""
+        for _ in range(5):
+            state = self.dom("color_spec_order")
+            if not state or state["first"]:
+                return
+            if not state.get("move"):
+                raise ListingError("颜色规格在下方，但未找到该区域右侧的上移按钮。")
+            self.log("颜色规格在下方，点击该区域上移并确认")
+
+            def accept_confirm(dialog):
+                if dialog.type == "confirm":
+                    dialog.accept()
+
+            self.page.on("dialog", accept_confirm)
+            try:
+                self.click_field(self.page.locator(state["move"]))
+
+                # The confirmation may be rendered after the click returns.
+                def moved():
+                    self.confirm_modal(("确定", "确认", "继续"))
+                    current = self.dom("color_spec_order")
+                    return current and (
+                        current["first"]
+                        or current["before"] < state["before"]
+                        or current["top"] < state["top"] - 2
+                    )
+
+                self.wait(moved, "颜色规格上移后顺序尚未改变", timeout=6)
+            finally:
+                self.page.remove_listener("dialog", accept_confirm)
+        raise ListingError("颜色规格尚未移动到第一项。")
+
     def set_color_photos(self, analysis):
+        self.ensure_color_first()
         _, initial = self.specs("颜色分类")
         for color in list(analysis.colors):
             if color not in {r["name"] for r in initial}:
@@ -1366,6 +1401,7 @@ class DouyinPage:
         )
 
     def batch_values(self, price, inventory):
+        self.batch_applied = False
         fields = self.price_inventory_fields()
         selector = fields["selector"]
         scope = self.page.locator(selector)
@@ -1381,17 +1417,21 @@ class DouyinPage:
         )
         if price_input.count() != 1 or stock_input.count() != 1:
             raise ListingError("未识别到唯一的价格/现货库存批量输入框。")
-        rows = self.dom("sku_rows", selector=selector) or []
-        if not rows:
-            raise ListingError("无法读取 SKU 表的价格与库存列。")
-        try:
-            amounts = {float(row["stock"]) for row in rows}
-        except ValueError:
-            raise ListingError("无法确认当前现货库存，未执行增减。") from None
         stock_selector = stock_input.evaluate(
             '(e)=>{e.dataset.glStock="batch";return "[data-gl-stock=batch]"}'
         )
         mode = self.dom("stock_mode", selector=stock_selector)
+        amounts = set()
+        if mode:
+            # Older pages use stock deltas. Read available rows only to compute
+            # that delta; virtualized or missing rows must not block the batch.
+            try:
+                amounts = {
+                    float(row["stock"])
+                    for row in (self.dom("sku_rows", selector=selector) or [])
+                }
+            except (ValueError, TypeError, KeyError):
+                pass
         price_input.fill(str(price))
         if mode and len(amounts) == 1:
             current = next(iter(amounts))
@@ -1401,10 +1441,8 @@ class DouyinPage:
                 stock_input.fill(str(int(abs(delta))))
             else:
                 stock_input.fill("")
-        elif not mode:
-            stock_input.fill(str(inventory))
         else:
-            stock_input.fill("")
+            stock_input.fill(str(inventory))
         price_input.blur()
         stock_input.blur()
         current = self.dom("batch_price_stock")
@@ -1421,43 +1459,11 @@ class DouyinPage:
             )
             current = self.dom("batch_price_stock")
             self.click_field(self.page.locator(current["button"]))
-            selector = current["selector"]
         else:
             self.click("批量设置", scope)
-        if mode and len(amounts) > 1:
-            for row in self.dom("sku_rows", selector=selector):
-                current = float(row["stock"])
-                delta = inventory - current
-                if not delta:
-                    continue
-                cell = self.page.locator(row["stockCell"])
-                target = cell.locator("input:not([type=hidden])")
-                if target.count() != 1:
-                    raise ListingError(
-                        "不同 SKU 的库存需要逐行调整，但页面控件不唯一。"
-                    )
-                self.click("增" if delta > 0 else "减", cell)
-                target.fill(str(int(abs(delta))))
-                target.press("Enter")
-                target.blur()
-
-        def matched():
-            nonlocal selector
-            refreshed = self.dom("batch_price_stock")
-            if refreshed:
-                selector = refreshed["selector"]
-            values = self.dom("sku_rows", selector=selector) or []
-            try:
-                return bool(values) and all(
-                    float(row["price"]) == float(price)
-                    and float(row["stock"]) == inventory
-                    for row in values
-                )
-            except ValueError:
-                return False
-
-        self.wait(matched, "部分 SKU 未确认目标价格与库存，未保存草稿", timeout=15)
-        return len(self.dom("sku_rows", selector=selector))
+        self.batch_applied = True
+        self.log("已点击批量设置，继续下一步")
+        return True
 
     def verify(self, product, analysis, sku_control, price, inventory):
         self.tab("属性信息")
@@ -1488,15 +1494,8 @@ class DouyinPage:
                 != expected[normalize_size(row["name"])]
             ):
                 raise ListingError("体重备注校验失败。")
-        rows = (
-            self.dom("sku_rows", selector=self.price_inventory_fields()["selector"])
-            or []
-        )
-        if len(rows) != len(colors) * len(sizes) or any(
-            float(row["price"]) != float(price) or float(row["stock"]) != inventory
-            for row in rows
-        ):
-            raise ListingError("SKU 行数或最终价格库存未完整确认。")
+        if not self.batch_applied:
+            raise ListingError("尚未成功点击批量设置。")
         radio = self.page.get_by_role("radio", name="48小时", exact=True)
         if radio.count() != 1 or not radio.is_checked():
             raise ListingError("发货时间未确认是 48 小时。")

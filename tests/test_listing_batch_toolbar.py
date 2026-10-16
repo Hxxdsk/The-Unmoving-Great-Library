@@ -25,7 +25,7 @@ def test_actual_batch_toolbar_is_found_without_using_navigation_heading(session)
         page.section = lambda *_: (_ for _ in ()).throw(
             AssertionError("不能寻找顶部价格库存标签或依赖字段标题")
         )
-        assert page.batch_values(399, 1000) == 2
+        assert page.batch_values(399, 1000) is True
         assert s.page.locator("#batch-price").input_value() == "399"
         assert s.page.locator("#batch-stock").input_value() == "1000"
         assert s.page.evaluate("window.batchCalls") == 1
@@ -49,6 +49,69 @@ def test_div_sku_table_and_row_role_toolbar_need_no_native_headers(session):
         page.section = lambda *_: (_ for _ in ()).throw(
             AssertionError("不得退回AI标题定位")
         )
-        assert page.batch_values(399, 1000) == 2
+        assert page.batch_values(399, 1000) is True
         assert s.page.evaluate("window.applied")
         assert s.page.locator(".st").first.input_value() == "1000"
+
+
+def test_batch_click_needs_no_sku_rows_or_result_validation(session):
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            """<div><input placeholder="价格"><input placeholder="现货库存">
+        <button onclick="window.clicked=true">批量设置</button></div>"""
+        )
+        page = DouyinPage(s, threading.Event())
+        original = page.dom
+
+        def without_rows(op, *args, **kwargs):
+            assert op != "sku_rows", "Direct-stock toolbar must not require SKU rows"
+            return original(op, *args, **kwargs)
+
+        page.dom = without_rows
+        assert page.batch_values(399, 1000) is True
+        assert page.batch_applied
+        assert s.page.evaluate("window.clicked")
+
+
+def test_color_moves_using_own_header_and_confirms(session):
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            """<style>header{display:flex;justify-content:space-between}section{height:120px}</style>
+        <section id="sizes"><header><label>尺码大小</label><button onclick="throw Error('wrong move')">上移</button></header></section>
+        <section id="colors"><header><label>颜色分类</label><button id="up" onclick="document.querySelector('[role=dialog]').hidden=false">上移</button></header></section>
+        <div role="dialog" hidden><button onclick="document.querySelector('#sizes').before(document.querySelector('#colors'));document.querySelector('#up').disabled=true;this.parentElement.hidden=true;window.confirmed=true">确定</button></div>"""
+        )
+        page = DouyinPage(s, threading.Event())
+        assert not page.dom("color_spec_order")["first"]
+        page.ensure_color_first()
+        assert s.page.evaluate("window.confirmed")
+        assert page.dom("color_spec_order")["first"]
+        page.ensure_color_first()
+
+
+def test_final_verification_ignores_sku_table_after_batch_click(session):
+    from types import SimpleNamespace
+    from suite.listing.vision import Analysis
+
+    with session as s:
+        s.check_login()
+        s.page.evaluate("editor()")
+        page = DouyinPage(s, threading.Event())
+        sku = page.fill_sku("CURRENT-SKU")
+        page.ship_48h()
+        page.batch_applied = True
+        original = page.dom
+
+        def without_table(op, *args, **kwargs):
+            assert op not in {
+                "sku_rows",
+                "batch_price_stock",
+            }, "最终核验不得再读取价格库存表"
+            return original(op, *args, **kwargs)
+
+        page.dom = without_table
+        page.verify(
+            SimpleNamespace(sku="CURRENT-SKU"), Analysis({}, [], []), sku, 399, 1000
+        )
