@@ -39,6 +39,23 @@
   }
   const root = selector ? document.querySelector(selector) : document.body;
   if (!root) return null;
+  if(op==='batch_price_stock'){
+    const outside=e=>!e.closest('aside,[role=dialog],thead,tbody,[role=row]');
+    const prices=[...root.querySelectorAll('input')].filter(e=>visible(e)&&outside(e)&&norm(e.placeholder)==='价格');
+    const stocks=[...root.querySelectorAll('input')].filter(e=>visible(e)&&outside(e)&&/^(现货库存|请输入库存|库存)$/.test(norm(e.placeholder)));
+    const matches=[];
+    for(const price of prices){
+      for(let box=price.parentElement,depth=0;box&&box!==document.body&&depth<10;box=box.parentElement,depth++){
+        const stock=stocks.filter(e=>box.contains(e));
+        const buttons=[...box.querySelectorAll('button,[role=button]')].filter(e=>visible(e)&&norm(e.innerText)==='批量设置');
+        const headers=[...box.querySelectorAll('thead th,[role=columnheader]')].map(e=>norm(e.innerText));
+        if(stock.length===1&&buttons.length===1&&headers.some(t=>/^价格/.test(t))&&headers.some(t=>/^现货库存/.test(t))){
+          matches.push({selector:mark(box),price:mark(price),stock:mark(stock[0]),button:mark(buttons[0])});break;
+        }
+      }
+    }
+    return matches.length===1?matches[0]:null;
+  }
   if(op==='interaction_guard'){
     const r=root.getBoundingClientRect();
     const points=[[.5,.5],[.2,.5],[.8,.5]];

@@ -1357,11 +1357,26 @@ class DouyinPage:
             self.confirm_modal(("使用识别结果", "确认填入", "应用", "确定"))
         self.wait(lambda: not dialog.is_visible(), "网站尺码识别结果尚未应用")
 
+    def price_inventory_fields(self):
+        fields = self.dom("batch_price_stock")
+        if fields:
+            return fields
+        return {"selector": self.section("价格与库存")}
+
     def batch_values(self, price, inventory):
-        selector = self.section("价格与库存")
+        fields = self.price_inventory_fields()
+        selector = fields["selector"]
         scope = self.page.locator(selector)
-        price_input = scope.get_by_placeholder("价格", exact=True)
-        stock_input = scope.get_by_placeholder(re.compile("现货库存|请输入库存|库存"))
+        price_input = (
+            self.page.locator(fields["price"])
+            if fields.get("price")
+            else scope.get_by_placeholder("价格", exact=True)
+        )
+        stock_input = (
+            self.page.locator(fields["stock"])
+            if fields.get("stock")
+            else scope.get_by_placeholder(re.compile("现货库存|请输入库存|库存"))
+        )
         if price_input.count() != 1 or stock_input.count() != 1:
             raise ListingError("未识别到唯一的价格/现货库存批量输入框。")
         rows = self.dom("sku_rows", selector=selector) or []
@@ -1388,7 +1403,25 @@ class DouyinPage:
             stock_input.fill(str(inventory))
         else:
             stock_input.fill("")
-        self.click("批量设置", scope)
+        price_input.blur()
+        stock_input.blur()
+        current = self.dom("batch_price_stock")
+        if current:
+
+            def batch_ready():
+                refreshed = self.dom("batch_price_stock")
+                return bool(
+                    refreshed and self.page.locator(refreshed["button"]).is_enabled()
+                )
+
+            self.wait(
+                batch_ready, "价格或库存尚未通过校验，批量设置按钮未启用", timeout=10
+            )
+            current = self.dom("batch_price_stock")
+            self.click_field(self.page.locator(current["button"]))
+            selector = current["selector"]
+        else:
+            self.click("批量设置", scope)
         if mode and len(amounts) > 1:
             for row in self.dom("sku_rows", selector=selector):
                 current = float(row["stock"])
@@ -1449,7 +1482,10 @@ class DouyinPage:
                 != expected[normalize_size(row["name"])]
             ):
                 raise ListingError("体重备注校验失败。")
-        rows = self.dom("sku_rows", selector=self.section("价格与库存")) or []
+        rows = (
+            self.dom("sku_rows", selector=self.price_inventory_fields()["selector"])
+            or []
+        )
         if len(rows) != len(colors) * len(sizes) or any(
             float(row["price"]) != float(price) or float(row["stock"]) != inventory
             for row in rows
