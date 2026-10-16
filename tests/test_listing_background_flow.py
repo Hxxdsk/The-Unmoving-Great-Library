@@ -30,6 +30,36 @@ def test_reference_is_in_initial_details_but_not_single_color_photos(tmp_path, s
         def generate(self, parts, schema):
             if "reference_ids" in schema.get("properties", {}):
                 return {"reference_ids": ["2"], "invalid_ids": []}
+            if "slots" in schema.get("properties", {}):
+                return {
+                    "slots": [
+                        {
+                            "reference_id": "0",
+                            "color": "灰色",
+                            "box": [0, 0, 500, 1000],
+                            "confidence": 0.99,
+                        },
+                        {
+                            "reference_id": "0",
+                            "color": "黑色",
+                            "box": [500, 0, 1000, 1000],
+                            "confidence": 0.99,
+                        },
+                    ]
+                }
+            if "matches" in schema.get("properties", {}):
+                return {
+                    "matches": [
+                        {
+                            "photo_id": str(i),
+                            "slot_id": f"slot_{i}",
+                            "confidence": 0.99,
+                            "ambiguous": False,
+                            "reason": "与对应标注服装格一致",
+                        }
+                        for i in range(2)
+                    ]
+                }
             assert any("本款多色对照图" in p.get("text", "") for p in parts)
             return super().generate(parts, schema)
 
@@ -53,6 +83,7 @@ def test_reference_is_in_initial_details_but_not_single_color_photos(tmp_path, s
         if e["event"] == "specphoto"
     )
     assert not any(e["event"] == "title" for e in session.audit)
+    assert len([e for e in session.audit if e["event"] == "specphoto"]) == 2
 
 
 def test_weight_notes_survive_rerenders_and_other_page_focus(session):

@@ -266,9 +266,38 @@ class DouyinPage:
     def photo_count(self, selector):
         return len(self.dom("photos", selector=selector) or [])
 
+    def interaction_point(self, target):
+        for _ in range(3):
+            self.check()
+            target.scroll_into_view_if_needed(timeout=2500)
+            selector = target.evaluate(
+                "e=>{if(!e.dataset.glId)e.dataset.glId='gl'+crypto.randomUUID().replaceAll('-','');return '[data-gl-id=\"'+e.dataset.glId+'\"]'}"
+            )
+            state = self.dom("interaction_guard", selector=selector) or {}
+            if state.get("point"):
+                return state["point"]
+            if state.get("close"):
+                self.log("收起遮挡操作控件的商品预览侧栏")
+                self.page.locator(state["close"]).click(timeout=2000)
+                self.page.wait_for_timeout(200)
+                continue
+            raise ListingError(
+                "当前控件被商品预览侧栏或其他浮层遮挡，未穿透点击；请收起遮挡面板"
+            )
+        raise ListingError("商品预览面板尚未收起，请关闭该预览后重试")
+
+    def click_field(self, target):
+        point = self.interaction_point(target)
+        target.click(position=point, timeout=2500)
+
     def hover_in_field(self, target, field):
         """Hover the real thumbnail/upload hit area, including its own overlay."""
         target.scroll_into_view_if_needed(timeout=4000)
+        guard = target.evaluate(
+            "e=>{if(!e.dataset.glId)e.dataset.glId='gl'+crypto.randomUUID().replaceAll('-','');return '[data-gl-id=\"'+e.dataset.glId+'\"]'}"
+        )
+        if (self.dom("interaction_guard", selector=guard) or {}).get("close"):
+            self.interaction_point(target)
         leaf = target.evaluate(
             "e=>{if(!e.dataset.glId)e.dataset.glId='gl'+crypto.randomUUID().replaceAll('-','');return '[data-gl-id=\"'+e.dataset.glId+'\"]'}"
         )
@@ -1145,13 +1174,29 @@ class DouyinPage:
                 self.dismiss_optional_dialogs()
 
     def set_sizes(self, sizes):
+        for attempt in range(3):
+            try:
+                return self._set_sizes(sizes)
+            except Cancelled:
+                raise
+            except Exception as exc:
+                if attempt == 2 or not any(
+                    word in str(exc)
+                    for word in ("Timeout", "detached", "预览", "已变化")
+                ):
+                    raise
+                self.log("尺码控件受遮挡或页面重绘，重新读取尺码后继续")
+                self.page.mouse.move(0, 0)
+                self.page.wait_for_timeout(200)
+
+    def _set_sizes(self, sizes):
         desired = {normalize_size(row["name"]): row["weight"] for row in sizes}
         selector, records = self.specs("尺码大小", allow_empty=True)
         for record in records:
             if normalize_size(record["name"]) not in desired:
                 if not record["remove"]:
                     raise ListingError("未识别到多余尺码的删除控件。")
-                self.page.locator(record["remove"]).click()
+                self.click_field(self.page.locator(record["remove"]))
                 self.confirm_modal(("确定", "确认", "删除"))
         for name in desired:
             selector, records = self.specs("尺码大小", allow_empty=True)
@@ -1169,6 +1214,7 @@ class DouyinPage:
                 entry = self.control("定位新增尺码的选择框", scope)
                 self.record_action(entry)
             if entry.evaluate("(e)=>e.tagName") == "SELECT":
+                self.interaction_point(entry)
                 choices = entry.locator("option").evaluate_all(
                     "(options)=>options.map(e=>({value:e.value,label:e.textContent}))"
                 )
@@ -1181,7 +1227,7 @@ class DouyinPage:
                     raise ListingError(f"未找到唯一可选尺码 {name}。")
                 entry.select_option(matches[0]["value"])
                 continue
-            entry.click()
+            self.click_field(entry)
             if entry.evaluate("(e)=>e.tagName") == "INPUT" and entry.is_editable():
                 entry.fill(name)
             options = self.page.get_by_role("option")
@@ -1193,9 +1239,9 @@ class DouyinPage:
             if len(matches) != 1:
                 option = self.control("选择尺码选项：" + name)
                 self.record_action(option)
-                option.click()
+                self.click_field(option)
             else:
-                matches[0].click()
+                self.click_field(matches[0])
             self.page.keyboard.press("Escape")
         _, records = self.specs("尺码大小")
         if {normalize_size(row["name"]) for row in records} != set(desired):

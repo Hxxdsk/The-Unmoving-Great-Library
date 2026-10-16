@@ -39,6 +39,32 @@
   }
   const root = selector ? document.querySelector(selector) : document.body;
   if (!root) return null;
+  if(op==='interaction_guard'){
+    const r=root.getBoundingClientRect();
+    const points=[[.5,.5],[.2,.5],[.8,.5]];
+    let blocker=null;
+    for(const [fx,fy] of points){
+      const x=r.x+r.width*fx,y=r.y+r.height*fy;
+      if(x<0||y<0||x>=innerWidth||y>=innerHeight)continue;
+      const hit=document.elementFromPoint(x,y);
+      if(hit&&(root===hit||root.contains(hit)))return {point:{x:r.width*fx,y:r.height*fy}};
+      blocker ||= hit;
+    }
+    const panel=blocker?.closest('aside[class*=sidePanel],aside[class*=preview],[class*=sidePanelOverlay]');
+    if(!panel)return {blocked:true};
+    const close=[...panel.querySelectorAll('button,[role=button],[aria-label],[title],[data-icon],svg,[class*=close],[class*=Close]')].filter(e=>{
+      if(!visible(e))return false;
+      const labels=[e.getAttribute('aria-label'),e.title,e.innerText].filter(Boolean).map(s=>s.trim());
+      const text=labels.join(' ');
+      const box=e.getBoundingClientRect();
+      return box.width<=80&&box.height<=80&&(labels.some(s=>/^(关闭|收起|关闭预览|关闭消费者预览|×|✕|Close)$/i.test(s))||/close/i.test([e.className?.baseVal||e.className,e.getAttribute('data-icon')].join(' ')))&&!/删除|移除/.test(text);
+    }).sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
+    if(close.length)return {close:mark(close[0].closest('button,[role=button]')||close[0])};
+    const label=[...document.querySelectorAll('label,span,div')].find(e=>visible(e)&&/^(消费者预览效果|消费者效果预览|消费者预览)$/.test(norm(e.innerText)));
+    const group=label?.closest('label')||label?.parentElement;
+    const toggle=group?.querySelector('[role=switch][aria-checked=true],input[type=checkbox]:checked');
+    return toggle?{close:mark(toggle)}:{blocked:true,preview:true};
+  }
   if (op === 'creation_upload') {
     // Detect the actual empty upload wizard, independently of a hovered menu
     // or unrelated AI recommendation cards elsewhere on the page.
