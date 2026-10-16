@@ -201,3 +201,19 @@ def test_color_classification_waits_until_after_creation(tmp_path, session):
             session_factory=lambda *_: nullcontext(s),
         ).run()
         assert results == [(product.sku, "已保存")]
+
+
+def test_title_blur_can_advance_without_waiting_for_old_title_input(tmp_path, session):
+    product = make_product(tmp_path)
+    with session as s:
+        fixture_route(
+            s,
+            """<script>
+        const oldRecommend=recommend;recommend=()=>{oldRecommend();
+        document.querySelector('#user-title').onblur=()=>editor();};</script>""",
+        )
+        page = DouyinPage(s, threading.Event())
+        page.create(product)
+        assert "/edit" in page.editor_url
+        generation = [e for e in s.page.evaluate("audit") if e["event"] == "generation"]
+        assert len(generation) == 1 and generation[0]["title"] == product.title

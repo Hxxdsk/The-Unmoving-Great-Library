@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 from PIL import Image, ImageOps
@@ -899,7 +900,7 @@ class DouyinPage:
         clicked_at, attempts, repairs = 0.0, 0, 0
         started = time.monotonic()
 
-        def progress():
+        def observe():
             nonlocal clicked_at, attempts, repairs
             if self.creation_state() in destinations:
                 return True
@@ -908,10 +909,14 @@ class DouyinPage:
                 return False
             if title_text is not None:
                 inputs = self.page.get_by_placeholder(re.compile(r"标题|2.60|1.30"))
-                inputs = [e for e in inputs.all() if e.is_visible() and e.is_editable()]
+                inputs = [
+                    e
+                    for e in inputs.all()
+                    if e.is_visible() and e.is_editable(timeout=1000)
+                ]
                 if len(inputs) == 1:
                     title = inputs[0]
-                    lost = title.input_value() != title_text
+                    lost = title.input_value(timeout=1000) != title_text
                     recommit = (
                         not button.is_enabled()
                         and repairs == 0
@@ -923,9 +928,8 @@ class DouyinPage:
                             raise ListingError(
                                 "页面反复重置商品标题，请检查标题校验或上传错误提示"
                             )
-                        title.fill("")
-                        title.fill(title_text)
-                        title.press("Tab")
+                        title.fill(title_text, timeout=1000)
+                        title.press("Tab", timeout=1000)
                         repairs += 1
                         self.log("已重新提交本款手填标题，等待生成按钮可用")
                         return False
@@ -947,6 +951,18 @@ class DouyinPage:
                 if self.creation_state() in destinations:
                     return True
                 self.log("生成按钮状态已变化，重新检查：" + str(exc).splitlines()[0])
+                return False
+
+        def progress():
+            try:
+                return observe()
+            except BrowserError as exc:
+                self.check()
+                if self.creation_state() in destinations:
+                    return True
+                self.log(
+                    "生成页正在变化，重新读取当前页面：" + str(exc).splitlines()[0]
+                )
                 return False
 
         self.log("等待图片上传和标题校验完成，再继续生成")
@@ -1084,10 +1100,33 @@ class DouyinPage:
                     title = self.control(
                         "定位商品标题输入框，填写用户提供的标题，不选择AI推荐标题"
                     )
-                title.fill(product.title.strip())
-                title.press("Tab")
-                if title.input_value() != product.title.strip():
-                    raise ListingError("用户商品标题未正确填写。")
+
+                def title_ready():
+                    if self.creation_state() == "editor":
+                        return True
+                    try:
+                        candidates = self.page.get_by_placeholder(
+                            re.compile(r"标题|2.60|1.30")
+                        )
+                        editable = [
+                            e
+                            for e in candidates.all()
+                            if e.is_visible() and e.is_editable(timeout=1000)
+                        ]
+                        current = editable[0] if len(editable) == 1 else title
+                        if current.input_value(timeout=1000) != product.title.strip():
+                            current.fill(product.title.strip(), timeout=1000)
+                            current.press("Tab", timeout=1000)
+                        if self.creation_state() == "editor":
+                            return True
+                        return (
+                            current.input_value(timeout=1000) == product.title.strip()
+                        )
+                    except BrowserError:
+                        self.check()
+                        return self.creation_state() == "editor"
+
+                self.wait(title_ready, "用户商品标题尚未正确填写", timeout=30)
                 self.phase = "已填写用户标题，继续生成商品编辑页"
                 self.click_generation(
                     re.compile(r"^确认信息.*继续生成$|^继续生成$"),
@@ -1498,6 +1537,55 @@ class DouyinPage:
             "未找到同一批量设置栏中的价格与现货库存输入框；请展开价格库存区域。未点击导航标签或其他字段"
         )
 
+    def click_batch_setting(self):
+        for attempt in range(3):
+            self.check()
+            fields = self.price_inventory_fields()
+            target = self.page.locator(fields["button"])
+            token = uuid.uuid4().hex
+            self.dom("batch_click_watch", token, fields["button"])
+            try:
+                try:
+                    self.click_field(target)
+                except Cancelled:
+                    raise
+                except BrowserError as exc:
+                    # A timeout after mouse-up does not mean the click failed.
+                    # Observe its actual DOM event before considering a retry.
+                    if not self.dom("batch_click_seen", token):
+                        self.page.wait_for_timeout(300)
+                    if self.dom("batch_click_seen", token):
+                        self.log("批量设置点击已送达，忽略后续等待超时，不重复点击")
+                        return
+                    self.log("批量按钮已变化，重新定位：" + str(exc).splitlines()[0])
+                    fresh = self.price_inventory_fields()
+                    target = self.page.locator(fresh["button"])
+                    self.dom("batch_click_watch", token, fresh["button"])
+                    target.evaluate(
+                        "e=>e.scrollIntoView({block:'nearest',inline:'nearest'})"
+                    )
+                    guard = (
+                        self.dom("interaction_guard", selector=fresh["button"]) or {}
+                    )
+                    if not guard.get("point") or not target.is_enabled():
+                        if attempt == 2:
+                            raise ListingError("批量设置按钮被遮挡或未启用")
+                        continue
+                    target.dispatch_event("click", timeout=1500)
+                if self.dom("batch_click_seen", token):
+                    return
+            except BrowserError as exc:
+                if self.dom("batch_click_seen", token):
+                    return
+                if attempt == 2:
+                    raise ListingError(
+                        "批量设置按钮重绘后仍未收到点击：" + str(exc).splitlines()[0]
+                    ) from exc
+                self.log("批量设置控件正在重绘，继续重读当前按钮")
+            finally:
+                self.dom("batch_click_cleanup", token)
+        raise ListingError("未收到批量设置按钮的点击事件，未继续保存")
+
     def batch_values(self, price, inventory):
         self.batch_applied = False
         fields = self.price_inventory_fields()
@@ -1543,22 +1631,15 @@ class DouyinPage:
             stock_input.fill(str(inventory))
         price_input.blur()
         stock_input.blur()
-        current = self.dom("batch_price_stock")
-        if current:
-
-            def batch_ready():
-                refreshed = self.dom("batch_price_stock")
-                return bool(
-                    refreshed and self.page.locator(refreshed["button"]).is_enabled()
-                )
-
-            self.wait(
-                batch_ready, "价格或库存尚未通过校验，批量设置按钮未启用", timeout=10
-            )
-            current = self.dom("batch_price_stock")
-            self.click_field(self.page.locator(current["button"]))
-        else:
-            self.click("批量设置", scope)
+        self.wait(
+            lambda: bool(
+                (current := self.dom("batch_price_stock"))
+                and self.page.locator(current["button"]).is_enabled()
+            ),
+            "价格或库存尚未通过校验，批量设置按钮未启用",
+            timeout=15,
+        )
+        self.click_batch_setting()
         self.batch_applied = True
         self.log("已点击批量设置，继续下一步")
         return True

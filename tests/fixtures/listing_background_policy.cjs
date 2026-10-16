@@ -15,8 +15,8 @@ const chrome = {
     onFocusChanged: hook(),
     async create(options) {
       calls.push({op:'window-create',options});
-      assert.equal(options.state,'minimized'); assert.equal(options.focused,false);
-      assert.equal(options.width,undefined); assert.equal(options.height,undefined);
+      assert.equal(options.state,'normal'); assert.equal(options.focused,false);
+      assert.equal(options.width,1600); assert.equal(options.height,1100);
       const tab={id:++seq,windowId:100,url:options.url};tabs.set(tab.id,tab);
       return {id:100,tabs:[tab]};
     },

@@ -32,6 +32,7 @@ const noWindowFocus = `(() => {
   });
 })();`;
 
+let workBounds = {width: 1600, height: 1100};
 let workWindow = null, latestWorkTab = null, epoch = null, creating = 0, detaching = Promise.resolve();
 const owned = new Set(), attached = new Set(), children = new Map(), targets = new Map();
 const tabForTarget = targetId => [...targets].find(([tabId, id]) => id === targetId)?.[0];
@@ -81,9 +82,9 @@ async function create(url = 'about:blank', openerTabId = null) {
   creating++;
   try {
   if (workWindow == null) {
-    // Stay on the taskbar until the user chooses to view the work window.
-    // CDP desktop metrics keep screenshots complete while the OS window is hidden.
-    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'minimized'});
+    // Match the outer browser's large bounds from the start, without activation.
+    // Maximized+focused:false is invalid on Chromium; normal full-size is valid.
+    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'normal', ...workBounds});
     workWindow = window.id;
     tab = await remember(window.tabs[0]);
   } else {
@@ -231,6 +232,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.tab?.incognito || url.hostname !== '127.0.0.1' || url.pathname !== '/greatlibrary/connect' ||
         url.protocol !== 'http:' || Number(url.port) !== message.port || !/^[a-f0-9]{64}$/.test(message.token) ||
         url.hash.slice(1) !== message.token) throw new Error('连接来源无效，请从工具箱点击连接 Edge');
+    try {
+      const outer = await chrome.windows.get(sender.tab.windowId);
+      workBounds = {width: Math.max(1600, outer.width || 0), height: Math.max(1000, outer.height || 1100)};
+      if (Number.isFinite(outer.left)) workBounds.left = outer.left;
+      if (Number.isFinite(outer.top)) workBounds.top = outer.top;
+    } catch (_) { /* Keep desktop defaults if source window metadata is unavailable. */ }
     if (socket) { clearInterval(heartbeat); socket.onclose = null; socket.close(); await disconnect(); }
     socket = new WebSocket(`ws://127.0.0.1:${message.port}/extension/${message.token}`);
     await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = () => reject(new Error('工具箱未运行，请重新点击连接 Edge')); });

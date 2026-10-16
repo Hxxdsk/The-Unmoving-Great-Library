@@ -115,3 +115,39 @@ def test_final_verification_ignores_sku_table_after_batch_click(session):
         page.verify(
             SimpleNamespace(sku="CURRENT-SKU"), Analysis({}, [], []), sku, 399, 1000
         )
+
+
+def test_batch_timeout_after_delivered_click_does_not_apply_twice(session):
+    from playwright.sync_api import TimeoutError as BrowserTimeout
+
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            """<div><input placeholder="价格"><input placeholder="现货库存">
+        <button onclick="window.batchCalls=(window.batchCalls||0)+1">批量设置</button></div>"""
+        )
+        page = DouyinPage(s, threading.Event())
+
+        def delivered_then_timeout(target):
+            target.click()
+            raise BrowserTimeout(
+                "performing click action: timeout waiting for acknowledgement"
+            )
+
+        page.click_field = delivered_then_timeout
+        assert page.batch_values(399, 1000)
+        assert s.page.evaluate("window.batchCalls") == 1
+        assert page.batch_applied
+        assert s.page.evaluate("Object.keys(window.__glBatchClicks).length") == 0
+
+
+def test_animated_batch_button_can_use_guarded_click_once(session):
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            """<style>@keyframes drift{from{transform:translateX(0)}to{transform:translateX(12px)}}button{animation:drift .16s infinite alternate linear}</style>
+        <div><input placeholder="价格"><input placeholder="现货库存"><button onclick="window.batchCalls=(window.batchCalls||0)+1">批量设置</button></div>"""
+        )
+        page = DouyinPage(s, threading.Event())
+        assert page.batch_values(399, 1000)
+        assert s.page.evaluate("window.batchCalls") == 1

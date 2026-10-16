@@ -30,7 +30,7 @@ const chrome = {
   windows: {
     onFocusChanged: hook(),
     async create({url, type, focused, state}) {
-      if(type !== 'normal' || focused !== false || state !== 'minimized') throw new Error('work window must be ordinary and unfocused');
+      if(type !== 'normal' || focused !== false || state !== 'normal') throw new Error('work window must be ordinary and unfocused');
       const result=await call('Target.createTarget',{url,newWindow:true,background:true});
       const {windowId}=await call('Browser.getWindowForTarget',{targetId:result.targetId});
       workWindows.add(windowId);

@@ -37,8 +37,20 @@
     }
     return null;
   }
+  if(op==='batch_click_seen')return !!window.__glBatchClicks?.[label]?.clicked;
+  if(op==='batch_click_cleanup'){
+    const record=window.__glBatchClicks?.[label];
+    if(record){for(const [element,handler] of record.listeners)element.removeEventListener('click',handler,true);delete window.__glBatchClicks[label];}
+    return true;
+  }
   const root = selector ? document.querySelector(selector) : document.body;
   if (!root) return null;
+  if(op==='batch_click_watch'){
+    window.__glBatchClicks??={};
+    const record=window.__glBatchClicks[label]??={clicked:false,listeners:[]};
+    const handler=()=>{record.clicked=true;};
+    root.addEventListener('click',handler,{capture:true,once:true});record.listeners.push([root,handler]);return true;
+  }
   if(op==='title_recommendation'){
     const eligible=e=>visible(e)&&!e.closest('aside,[role=dialog]');
     const labels=[...root.querySelectorAll('label,span,div,p')].filter(e=>eligible(e)&&norm(e.innerText)==='商品标题')
