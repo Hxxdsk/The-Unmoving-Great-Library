@@ -76,12 +76,12 @@ def test_workflow_fills_panels_and_specs_from_top_to_bottom(
         return original_tab(self, name)
 
     monkeypatch.setattr(DouyinPage, "tab", tab)
-    for name in ("set_color_photos", "set_sizes", "parse_size_chart", "batch_values"):
+    for name in ("set_color_photos", "set_sizes", "batch_values"):
         original = getattr(DouyinPage, name)
 
         def wrapper(self, *args, _name=name, _original=original, **kwargs):
             calls.append(("action", _name))
-            if _name == "parse_size_chart":
+            if _name == "batch_values":
                 _, rows = self.specs("尺码大小")
                 assert all(self.page.locator(r["note"]).input_value() for r in rows)
             return _original(self, *args, **kwargs)
@@ -121,6 +121,5 @@ def test_workflow_fills_panels_and_specs_from_top_to_bottom(
         assert [n for kind, n in calls if kind == "action"] == [
             "set_color_photos",
             "set_sizes",
-            "parse_size_chart",
             "batch_values",
         ]

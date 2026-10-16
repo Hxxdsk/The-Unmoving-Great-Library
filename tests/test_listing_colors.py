@@ -13,7 +13,7 @@ def test_missing_colors_are_skipped_and_ai_uses_only_color_folder(tmp_path):
     product = make_product(tmp_path)
     result = analyze(Client(), product, ["灰色", "黑色"], threading.Event())
     assert all(p.parent.name == "颜色" for p in result.colors.values())
-    for image in product.images["颜色"]:
+    for image in product.color_photos:
         image.unlink()
     product = scan_products(tmp_path)[0]
     assert "颜色 文件夹缺少图片" not in product.issues
@@ -29,9 +29,9 @@ def test_details_replaced_before_generation_and_main_retained(tmp_path, session)
         page.create(product)
         audit = s.page.evaluate("window.audit")
         generation = next(e for e in audit if e["event"] == "generation")
-        assert generation["details"] == ["1.png", "2.png"]
+        assert generation["details"] == ["1.png", "2.png", "尺码.png"]
         details = next(e for e in audit if e.get("field") == "wizard-detail")
-        assert details["files"] == ["1.png", "2.png"]
+        assert details["files"] == ["1.png", "2.png", "尺码.png"]
         assert audit.index(details) < audit.index(generation)
         assert len(s.page.locator("#main img").all()) == 5
         assert not page.details_prepared

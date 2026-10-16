@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 IMAGES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
-FOLDERS = ("800", "3.4", "水洗标", "详情", "白底", "尺码", "颜色")
+FOLDERS = ("800", "3.4", "水洗标", "详情", "白底", "颜色")
 
 
 class ListingError(RuntimeError):
@@ -44,7 +44,7 @@ class Product:
     @property
     def color_photos(self):
         return (
-            self.images.get("颜色", ())
+            tuple(p for p in self.images.get("颜色", ()) if p.stem != "尺码")
             if self.color_uploads is None
             else self.color_uploads
         )
@@ -96,6 +96,9 @@ def scan_products(root: Path) -> list[Product]:
                 digest.update(
                     f"{name}/{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode()
                 )
+        images["尺码"] = tuple(p for p in images["颜色"] if p.stem == "尺码")
+        if not images["尺码"]:
+            issues.append("颜色文件夹缺少名为尺码的图片（如尺码.jpg）")
         if len(images["白底"]) > 1:
             issues.append("白底文件夹应只有一张图片")
         products.append(Product(folder, images, issues, digest.hexdigest()))

@@ -65,13 +65,13 @@ class BlueReferenceClient(Client):
                     {
                         "reference_id": "0",
                         "color": "月光蓝",
-                        "box": [0, 0, 500, 1000],
+                        "box": {"x_min": 0, "y_min": 0, "x_max": 500, "y_max": 1000},
                         "confidence": 0.99,
                     },
                     {
                         "reference_id": "0",
                         "color": "天池蓝",
-                        "box": [500, 0, 1000, 1000],
+                        "box": {"x_min": 500, "y_min": 0, "x_max": 1000, "y_max": 1000},
                         "confidence": 0.99,
                     },
                 ]
@@ -114,7 +114,7 @@ def blue_product(tmp_path):
     for path, color in zip(product.images["颜色"], ("lightblue", "steelblue")):
         Image.new("RGB", (100, 100), color).save(path)
     product.color_references = (ref,)
-    product.color_uploads = product.images["颜色"]
+    product.color_uploads = tuple(p for p in product.images["颜色"] if p.stem != "尺码")
     return product
 
 

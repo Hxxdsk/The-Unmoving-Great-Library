@@ -24,7 +24,7 @@ def test_missing_color_images_still_save_and_size_weights_match_each_row(
     tmp_path, session, photo_count
 ):
     product = make_product(tmp_path)
-    for path in product.images["颜色"][photo_count:]:
+    for path in product.color_photos[photo_count:]:
         path.unlink()
     product = scan_products(tmp_path)[0]
     product.title = "用户输入的商品标题"

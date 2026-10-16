@@ -40,18 +40,22 @@
   const root = selector ? document.querySelector(selector) : document.body;
   if (!root) return null;
   if(op==='batch_price_stock'){
-    const outside=e=>!e.closest('aside,[role=dialog],thead,tbody,[role=row]');
-    const prices=[...root.querySelectorAll('input')].filter(e=>visible(e)&&outside(e)&&norm(e.placeholder)==='价格');
-    const stocks=[...root.querySelectorAll('input')].filter(e=>visible(e)&&outside(e)&&/^(现货库存|请输入库存|库存)$/.test(norm(e.placeholder)));
+    const outside=e=>!e.closest('aside,[role=dialog],thead,tbody,[role=table] [role=row],[role=grid] [role=row]');
+    const prices=[...root.querySelectorAll('input')].filter(e=>visible(e)&&outside(e)&&norm(e.placeholder||e.getAttribute('aria-label'))==='价格');
+    const stocks=[...root.querySelectorAll('input')].filter(e=>visible(e)&&outside(e)&&/^(现货库存|请输入库存|库存)$/.test(norm(e.placeholder||e.getAttribute('aria-label'))));
     const matches=[];
     for(const price of prices){
-      for(let box=price.parentElement,depth=0;box&&box!==document.body&&depth<10;box=box.parentElement,depth++){
+      for(let box=price.parentElement,depth=0;box&&box!==document.body&&depth<12;box=box.parentElement,depth++){
         const stock=stocks.filter(e=>box.contains(e));
         const buttons=[...box.querySelectorAll('button,[role=button]')].filter(e=>visible(e)&&norm(e.innerText)==='批量设置');
-        const headers=[...box.querySelectorAll('thead th,[role=columnheader]')].map(e=>norm(e.innerText));
-        if(stock.length===1&&buttons.length===1&&headers.some(t=>/^价格/.test(t))&&headers.some(t=>/^现货库存/.test(t))){
-          matches.push({selector:mark(box),price:mark(price),stock:mark(stock[0]),button:mark(buttons[0])});break;
+        if(stock.length!==1||buttons.length!==1)continue;
+        // Locate the toolbar without requiring native table headers. The site
+        // can render its header and body in separate div-based components.
+        let region=box;
+        for(let p=box;p&&p!==document.body;p=p.parentElement){
+          if(p.querySelector('table,[role=table],[role=grid]')||[...p.querySelectorAll('input')].filter(e=>visible(e)&&!box.contains(e)&&!e.closest('aside')).length>=2){region=p;break;}
         }
+        matches.push({selector:mark(region),toolbar:mark(box),price:mark(price),stock:mark(stock[0]),button:mark(buttons[0])});break;
       }
     }
     return matches.length===1?matches[0]:null;
@@ -221,7 +225,22 @@
     const headers=[...root.querySelectorAll('thead th,[role=columnheader]')].map(e=>norm(e.innerText));
     const priceIndex=headers.findIndex(s=>/^价格/.test(s));
     const stockIndex=headers.findIndex(s=>/^现货库存/.test(s));
-    if (priceIndex<0 || stockIndex<0) return [];
+    if (priceIndex<0 || stockIndex<0 || !root.querySelector('tbody tr')) {
+      const batch=[...root.querySelectorAll('button,[role=button]')].find(e=>visible(e)&&norm(e.innerText)==='批量设置');
+      let toolbar=batch?.parentElement;
+      while(toolbar&&toolbar!==root&&!toolbar.querySelector('input[placeholder="价格"]'))toolbar=toolbar.parentElement;
+      const inputs=[...root.querySelectorAll('input')].filter(e=>visible(e)&&!e.disabled&&!e.readOnly&&!['hidden','checkbox','radio','file'].includes(e.type)&&!e.closest('aside')&&!toolbar?.contains(e));
+      const result=[],used=new Set();
+      for(const price of inputs){
+        if(used.has(price)||!/^请输入|^价格$/.test(norm(price.placeholder)))continue;
+        const r=price.getBoundingClientRect();
+        const stock=inputs.filter(e=>e!==price&&!used.has(e)&&/^\d+(?:\.\d+)?$/.test(e.value||'')&&Math.abs(e.getBoundingClientRect().y-r.y)<10&&e.getBoundingClientRect().x>=r.right).sort((a,b)=>a.getBoundingClientRect().x-b.getBoundingClientRect().x)[0];
+        if(!stock)continue;
+        used.add(price);used.add(stock);
+        result.push({row:mark(price.parentElement),price:price.value,stock:stock.value,stockCell:mark(stock.parentElement)});
+      }
+      return result;
+    }
     const occupied=[], previous=[];
     return [...root.querySelectorAll('tbody tr')].filter(visible).map(row => {
       for(let i=0;i<occupied.length;i++)occupied[i]=Math.max(0,(occupied[i]||0)-1);

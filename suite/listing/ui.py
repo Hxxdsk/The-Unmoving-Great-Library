@@ -380,7 +380,7 @@ class ListingWindow(QMainWindow):
                 f'{min(5,len(product.images["800"]))} / {min(5,len(product.images["3.4"]))}',
                 str(len(product.images["详情"])),
                 f'{len(product.images["白底"])} / {len(product.images["水洗标"])}',
-                f'{len(product.images["颜色"])} / {len(product.images["尺码"])}',
+                f'{len(product.color_photos)} / {len(product.images["尺码"])}',
                 "资料缺失" if product.issues else reason or "待处理",
                 "0%",
                 "；".join(product.issues),

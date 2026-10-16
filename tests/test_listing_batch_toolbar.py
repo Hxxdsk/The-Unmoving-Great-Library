@@ -34,3 +34,21 @@ def test_actual_batch_toolbar_is_found_without_using_navigation_heading(session)
         fields = page.price_inventory_fields()
         rows = page.dom("sku_rows", selector=fields["selector"])
         assert all(r["price"] == "399" and r["stock"] == "1000" for r in rows)
+
+
+def test_div_sku_table_and_row_role_toolbar_need_no_native_headers(session):
+    with session as s:
+        s.check_login()
+        s.page.set_content(
+            """<style>.sku{display:flex;gap:30px;height:45px}.sku input{width:120px}</style><nav><button>价格库存</button></nav>
+        <section id="card"><div>价格与库存</div><div role="row" id="bar"><input id="p" placeholder="价格"><input id="q" placeholder="现货库存"><input placeholder="商家编码"><button id="apply">批量设置</button></div>
+        <div class="custom-grid"><div>颜色分类　尺码大小　价格　现货库存</div><div class="sku"><input class="pr" placeholder="请输入"><input class="st" value="0"></div><div class="sku"><input class="pr" placeholder="请输入"><input class="st" value="0"></div></div></section>
+        <script>(()=>{document.querySelector('#apply').onclick=()=>{for(const e of document.querySelectorAll('.pr'))e.value=document.querySelector('#p').value;for(const e of document.querySelectorAll('.st'))e.value=document.querySelector('#q').value;window.applied=true}})();</script>"""
+        )
+        page = DouyinPage(s, threading.Event())
+        page.section = lambda *_: (_ for _ in ()).throw(
+            AssertionError("不得退回AI标题定位")
+        )
+        assert page.batch_values(399, 1000) == 2
+        assert s.page.evaluate("window.applied")
+        assert s.page.locator(".st").first.input_value() == "1000"

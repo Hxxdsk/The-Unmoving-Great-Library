@@ -74,7 +74,7 @@ def test_reference_is_in_initial_details_but_not_single_color_photos(tmp_path, s
     assert result == [(product.sku, "已保存")]
     generation = next(e for e in session.audit if e["event"] == "generation")
     assert generation["title"] == product.title
-    assert generation["details"] == ["1.png", "2.png", "99-多色对照.png"]
+    assert generation["details"] == ["1.png", "2.png", "99-多色对照.png", "尺码.png"]
     saved = next(e for e in session.audit if e["event"] == "save")
     assert saved["details"] == ["详情-1.png", "详情-2.png"]
     assert not any(

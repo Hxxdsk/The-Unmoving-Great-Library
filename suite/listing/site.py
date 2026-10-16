@@ -142,7 +142,7 @@ class DouyinPage:
 
     def ai_context(self, goal):
         return {
-            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情上传整个颜色文件夹（包含多色对照图） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 尺码及右侧备注体重xx-xx斤 → AI解析尺码图是本地图片上传入口 → 价格399、现货1000 → 校验 → 保存草稿并确认成功 → 新开下一款并关闭旧页",
+            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情上传整个颜色文件夹（包含多色对照图） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 使用颜色目录中尺码图识别已有尺码的右侧备注体重xx-xx斤，不再上传尺码图 → 价格399、现货1000 → 校验 → 保存草稿并确认成功 → 新开下一款并关闭旧页",
             "当前阶段": self.phase,
             "本次目的": goal,
             "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
@@ -1361,7 +1361,9 @@ class DouyinPage:
         fields = self.dom("batch_price_stock")
         if fields:
             return fields
-        return {"selector": self.section("价格与库存")}
+        raise ListingError(
+            "未找到同一批量设置栏中的价格与现货库存输入框；请展开价格库存区域。未点击导航标签或其他字段"
+        )
 
     def batch_values(self, price, inventory):
         fields = self.price_inventory_fields()
@@ -1440,6 +1442,10 @@ class DouyinPage:
                 target.blur()
 
         def matched():
+            nonlocal selector
+            refreshed = self.dom("batch_price_stock")
+            if refreshed:
+                selector = refreshed["selector"]
             values = self.dom("sku_rows", selector=selector) or []
             try:
                 return bool(values) and all(

@@ -27,7 +27,7 @@ def short_fixture_waits(monkeypatch):
 
 
 def make_product(root, name="货号A"):
-    for folder in ("800", "3.4", "白底", "详情", "水洗标", "尺码", "颜色"):
+    for folder in ("800", "3.4", "白底", "详情", "水洗标", "颜色"):
         directory = root / name / folder
         directory.mkdir(parents=True)
         for number in (
@@ -38,6 +38,7 @@ def make_product(root, name="货号A"):
             Image.new("RGB", (60, 80), "black" if number % 2 else "gray").save(
                 directory / f"{number}.png"
             )
+    Image.new("RGB", (600, 800), "white").save(root / name / "颜色" / "尺码.png")
     product = scan_products(root)[0]
     product.title = "用户输入的商品标题"
     return product
@@ -196,7 +197,7 @@ def test_full_browser_workflow_preserves_sku_replaces_details_and_only_saves_dra
         "XL"
     ] == "120-140斤"
     assert len([e for e in session.audit if e["event"] == "wizard"][0]["files"]) == 5
-    assert any(e["event"] == "site-size-ai" for e in session.audit)
+    assert not any(e["event"] == "site-size-ai" for e in session.audit)
     assert not any(e["event"] == "FORBIDDEN_PUBLISH" for e in session.audit)
     assert Journal(tmp_path).get(product)["status"] == "saved"
 
