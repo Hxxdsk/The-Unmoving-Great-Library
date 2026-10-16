@@ -79,9 +79,11 @@ def test_live_three_column_color_rows_override_shifted_legacy_mapping(
         assert s.page.evaluate("window.remounted") is True
 
 
-def test_unnamed_size_chart_in_color_folder_is_initial_details_only(tmp_path, session):
+def test_filename_size_chart_only_is_excluded_and_ai_invalids_are_ignored(
+    tmp_path, session
+):
     product = make_product(tmp_path)
-    chart = product.path / "颜色" / "99-random-name.png"
+    chart = product.path / "颜色" / "尺码.png"
     Image.new("RGB", (600, 800), "white").save(chart)
     from suite.listing.models import scan_products
 
@@ -91,7 +93,7 @@ def test_unnamed_size_chart_in_color_folder_is_initial_details_only(tmp_path, se
     class Classifier(Client):
         def generate(self, parts, schema):
             assert "尺码表" in parts[0]["text"]
-            return {"reference_ids": [], "invalid_ids": ["2"]}
+            return {"reference_ids": [], "invalid_ids": ["0", "1"]}
 
     prepare_color_sources(Classifier(), product, threading.Event())
     assert chart not in product.color_photos
