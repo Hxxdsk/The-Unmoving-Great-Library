@@ -14,9 +14,7 @@ from suite.listing.guidance import UserGuide
 from suite.listing.vision import prepare_color_sources
 
 
-def test_reference_is_never_uploaded_and_user_title_and_final_details_are_used(
-    tmp_path, session
-):
+def test_reference_is_in_initial_details_but_not_single_color_photos(tmp_path, session):
     product = make_product(tmp_path)
     Image.new("RGB", (790, 1582), "white").save(
         product.path / "颜色" / "99-多色对照.png"
@@ -46,10 +44,14 @@ def test_reference_is_never_uploaded_and_user_title_and_final_details_are_used(
     assert result == [(product.sku, "已保存")]
     generation = next(e for e in session.audit if e["event"] == "generation")
     assert generation["title"] == product.title
-    assert generation["details"] == ["1.png", "2.png"]
+    assert generation["details"] == ["1.png", "2.png", "99-多色对照.png"]
     saved = next(e for e in session.audit if e["event"] == "save")
     assert saved["details"] == ["详情-1.png", "详情-2.png"]
-    assert not any("99-多色对照.png" in e.get("files", []) for e in session.audit)
+    assert not any(
+        "99-多色对照.png" in e.get("files", [])
+        for e in session.audit
+        if e["event"] == "specphoto"
+    )
     assert not any(e["event"] == "title" for e in session.audit)
 
 

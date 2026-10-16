@@ -142,7 +142,7 @@ class DouyinPage:
 
     def ai_context(self, goal):
         return {
-            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情只上传颜色文件夹单色图、排除多色对照图 → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 尺码及右侧备注体重xx-xx斤 → AI解析尺码图是本地图片上传入口 → 价格399、现货1000 → 校验 → 保存草稿并确认成功 → 新开下一款并关闭旧页",
+            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情上传整个颜色文件夹（包含多色对照图） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 尺码及右侧备注体重xx-xx斤 → AI解析尺码图是本地图片上传入口 → 价格399、现货1000 → 校验 → 保存草稿并确认成功 → 新开下一款并关闭旧页",
             "当前阶段": self.phase,
             "本次目的": goal,
             "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
@@ -482,6 +482,23 @@ class DouyinPage:
             self.set_sizes(sizes)
 
     def creation_state(self):
+        try:
+            return self._creation_state()
+        except Cancelled:
+            raise
+        except Exception as exc:
+            if any(
+                text in str(exc)
+                for text in (
+                    "Execution context was destroyed",
+                    "Cannot find context",
+                    "Frame was detached",
+                )
+            ):
+                return "loading"
+            raise
+
+    def _creation_state(self):
         # A navigation can advance directly, or open a new tool-owned tab.
         candidates = list(
             dict.fromkeys(
@@ -509,6 +526,8 @@ class DouyinPage:
         if self.dom("section", "主图3:4") or self.dom("section", "主图3：4"):
             self.editor_url = self.page.url
             return "editor"
+        if self.dom("creation_upload"):
+            return "upload"
         if self.dom("recommendations") or (
             self.visible_control(re.compile(r"确认信息.*继续生成|^继续生成$"))
             is not None
@@ -664,11 +683,12 @@ class DouyinPage:
                     history.append("旧记忆需按当前页面调整：" + str(exc)[:120])
                 self.memory_failed(recipe)
         attempted, ai_calls, human_steps = set(), 0, 0
+        transient_failures = {}
         loading_since = None
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            self.check()
             state = self.creation_state()
+            self.check()
             if ready():
                 if self.memory and actions:
                     try:
@@ -700,7 +720,11 @@ class DouyinPage:
             )
             target, kind = (option, "click") if option is not None else (entry, "hover")
             if target is not None:
-                descriptor = target.evaluate(DESCRIBE)
+                try:
+                    descriptor = target.evaluate(DESCRIBE, timeout=1500)
+                except Exception:
+                    self.page.wait_for_timeout(100)
+                    continue
                 identity = (kind, str(descriptor))
                 if identity in attempted and option is None:
                     kind, identity = "click", ("click", str(descriptor))
@@ -708,10 +732,48 @@ class DouyinPage:
                     attempted.add(identity)
                     safe_target(target)
                     actions.append({"kind": kind, "target": descriptor})
-                    if kind == "hover":
-                        target.hover(timeout=4000)
-                    else:
-                        target.click(timeout=5000)
+                    try:
+                        if kind == "hover":
+                            target.hover(timeout=1500)
+                        else:
+                            # A hover portal can collapse or animate as the
+                            # pointer crosses its gap. Use the visible item's
+                            # own click handler after normal pointer retries.
+                            target.click(timeout=1500)
+                    except Cancelled:
+                        raise
+                    except Exception as exc:
+                        if ready():
+                            continue
+                        transient_failures[identity] = (
+                            transient_failures.get(identity, 0) + 1
+                        )
+                        self.log(
+                            f"创建入口暂时不可点，重新检查页面：{str(exc).splitlines()[0]}"
+                        )
+                        if option is not None:
+                            if entry is not None:
+                                try:
+                                    entry.hover(timeout=1000)
+                                except Exception:
+                                    pass
+                            fresh = self.visible_control(
+                                re.compile(r"^(单商品|单个商品|独立商品|单品商品)$")
+                            )
+                            if fresh is not None and fresh.is_enabled():
+                                try:
+                                    safe_target(fresh)
+                                    fresh.evaluate(
+                                        "e=>{if(!e.isConnected||!e.getClientRects().length||getComputedStyle(e).visibility==='hidden')throw new Error('菜单已收起');e.click()}"
+                                    )
+                                    self.log("已通过当前可见单商品菜单继续")
+                                except Exception:
+                                    if not ready() and transient_failures[identity] < 3:
+                                        attempted.discard(identity)
+                            elif transient_failures[identity] < 3:
+                                attempted.discard(identity)
+                        self.page.wait_for_timeout(250)
+                        continue
                     self.page.wait_for_timeout(400)
                     history.append({"action": kind, "text": descriptor["text"]})
                     continue
@@ -767,6 +829,75 @@ class DouyinPage:
             ai_calls = max(0, ai_calls - 2)
         raise ListingError("创建流程长时间未推进，请检查页面或重新指导。")
 
+    def click_generation(self, pattern, destinations, title_text=None):
+        """Wait for validation and rerenders before a single generation action."""
+        clicked_at, attempts, repairs = 0.0, 0, 0
+        started = time.monotonic()
+
+        def progress():
+            nonlocal clicked_at, attempts, repairs
+            if self.creation_state() in destinations:
+                return True
+            button = self.visible_control(pattern)
+            if button is None:
+                return False
+            if title_text is not None:
+                inputs = self.page.get_by_placeholder(re.compile(r"标题|2.60|1.30"))
+                inputs = [e for e in inputs.all() if e.is_visible() and e.is_editable()]
+                if len(inputs) == 1:
+                    title = inputs[0]
+                    lost = title.input_value() != title_text
+                    recommit = (
+                        not button.is_enabled()
+                        and repairs == 0
+                        and time.monotonic() - started > 1
+                        and not self.dom("busy")
+                    )
+                    if lost or recommit:
+                        if repairs >= 3:
+                            raise ListingError(
+                                "页面反复重置商品标题，请检查标题校验或上传错误提示"
+                            )
+                        title.fill("")
+                        title.fill(title_text)
+                        title.press("Tab")
+                        repairs += 1
+                        self.log("已重新提交本款手填标题，等待生成按钮可用")
+                        return False
+            if not button.is_enabled() or self.dom("busy"):
+                return False
+            if clicked_at:
+                # Let the existing request advance; do not generate twice.
+                return True
+            if attempts >= 3:
+                raise ListingError("生成入口多次变化，请检查当前页面上传和标题校验")
+            safe_target(button)
+            attempts += 1
+            try:
+                button.click(timeout=1500)
+                clicked_at = time.monotonic()
+                return True
+            except Exception as exc:
+                if self.creation_state() in destinations:
+                    return True
+                self.log("生成按钮状态已变化，重新检查：" + str(exc).splitlines()[0])
+                return False
+
+        self.log("等待图片上传和标题校验完成，再继续生成")
+        try:
+            self.wait(progress, "生成按钮仍不可用", timeout=90)
+        except Cancelled:
+            raise
+        except ListingError as exc:
+            errors = self.page.locator(
+                "[role=alert],[aria-invalid=true],[class*=error],[class*=Error],[class*=explain]"
+            ).evaluate_all(
+                "nodes=>[...new Set(nodes.filter(e=>e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden').map(e=>(e.innerText||e.getAttribute('aria-label')||'').trim()).filter(t=>t&&t.length<200))].slice(0,6).join('；')"
+            )
+            raise ListingError(
+                f"继续生成尚未就绪：{errors or str(exc)}；请检查图片是否上传成功及商品标题格式，未强制点击禁用按钮"
+            ) from exc
+
     def create(self, product):
         if not 2 <= len(product.title.strip()) <= 60:
             raise ListingError("请在货号旁填写2-60字商品标题。")
@@ -783,7 +914,12 @@ class DouyinPage:
             self.reach_creation()
             state = self.creation_state()
             if state == "upload":
-                local = self.control("本地上传")
+                local_selector = self.dom("creation_upload")
+                local = (
+                    self.page.locator(local_selector)
+                    if local_selector
+                    else self.control("本地上传")
+                )
                 with self.page.expect_file_chooser(timeout=15000) as chooser:
                     self.record_action(local)
                     local.click(timeout=8000)
@@ -799,7 +935,7 @@ class DouyinPage:
                     timeout=90,
                 )
                 self.phase = "800主图已上传，进入网站推荐标题或商品编辑页"
-                self.click(re.compile(r"^下一步.*"))
+                self.click_generation(re.compile(r"^下一步.*"), ("titles", "editor"))
                 self.navigation_wait(
                     lambda: self.creation_state() in ("titles", "editor"),
                     "等待网站生成标题或编辑页",
@@ -807,9 +943,9 @@ class DouyinPage:
                 )
             state = self.creation_state()
             if state == "titles":
-                self.phase = "生成前仅上传单色颜色图，填写用户标题"
-                if product.color_photos:
-                    self.replace_images(("商品详情",), product.color_photos)
+                self.phase = "生成前上传整个颜色文件夹（含多色对照图），填写用户标题"
+                if product.images.get("颜色"):
+                    self.replace_images(("商品详情",), product.images["颜色"])
                 self.wait(
                     lambda: not self.dom("busy"),
                     "颜色图片尚未上传完成",
@@ -821,10 +957,15 @@ class DouyinPage:
                         "定位商品标题输入框，填写用户提供的标题，不选择AI推荐标题"
                     )
                 title.fill(product.title.strip())
+                title.press("Tab")
                 if title.input_value() != product.title.strip():
                     raise ListingError("用户商品标题未正确填写。")
                 self.phase = "已填写用户标题，继续生成商品编辑页"
-                self.click(re.compile(r"^确认信息.*继续生成$|^继续生成$"))
+                self.click_generation(
+                    re.compile(r"^确认信息.*继续生成$|^继续生成$"),
+                    ("editor",),
+                    title_text=product.title.strip(),
+                )
                 self.navigation_wait(
                     lambda: self.creation_state() == "editor",
                     "进入商品编辑页",

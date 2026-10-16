@@ -126,7 +126,7 @@ def size_chart_parts(path):
 
 
 def prepare_color_sources(client, product, cancel, log=lambda _: None):
-    """Separate multi-colour guides before any browser upload."""
+    """Classify guides for later single-colour specification uploads."""
     photos = product.images.get("颜色", ())
     if not photos:
         product.color_uploads = ()
@@ -164,7 +164,7 @@ def prepare_color_sources(client, product, cancel, log=lambda _: None):
     if not isinstance(result, dict) or any(
         not isinstance(result.get(k), list) for k in ("reference_ids", "invalid_ids")
     ):
-        raise ListingError("颜色图片分类无效，未上传可能混入的多色对照图")
+        raise ListingError("颜色图片分类无效，无法区分后续单色规格图")
     valid = {str(i) for i in range(len(photos))}
     refs = {str(i) for i in result["reference_ids"]}
     invalid = {str(i) for i in result["invalid_ids"]}
@@ -175,7 +175,7 @@ def prepare_color_sources(client, product, cancel, log=lambda _: None):
         p for i, p in enumerate(photos) if str(i) not in refs | invalid
     )
     log(
-        f"颜色素材：{len(product.color_photos)} 张单色图，{len(product.color_references)} 张多色对照图仅供识别、不上传"
+        f"颜色素材：{len(product.color_photos)} 张单色图，{len(product.color_references)} 张多色对照图参与初始详情、跳过后续单色规格图"
     )
 
 

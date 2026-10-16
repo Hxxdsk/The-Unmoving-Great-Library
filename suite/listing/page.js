@@ -39,6 +39,18 @@
   }
   const root = selector ? document.querySelector(selector) : document.body;
   if (!root) return null;
+  if (op === 'creation_upload') {
+    // Detect the actual empty upload wizard, independently of a hovered menu
+    // or unrelated AI recommendation cards elsewhere on the page.
+    const next=[...root.querySelectorAll('button,[role=button]')].some(e=>visible(e)&&/^下一步.*生成商品/.test(norm(e.innerText)));
+    if(!next)return null;
+    const candidates=[...root.querySelectorAll('button,[role=button],a,label,span,div')]
+      .filter(e=>visible(e)&&norm(e.innerText)==='本地上传')
+      .sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length);
+    const leaves=candidates.filter(e=>!candidates.some(child=>child!==e&&e.contains(child)));
+    const targets=[...new Set(leaves.map(e=>e.closest('button,[role=button],a,label')||e))];
+    return targets.length===1?mark(targets[0]):null;
+  }
   if (op === 'hover_point') {
     const boundary=document.querySelector(label);
     if(!boundary||!boundary.contains(root))return null;
