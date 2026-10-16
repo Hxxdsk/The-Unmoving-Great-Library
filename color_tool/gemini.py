@@ -132,6 +132,7 @@ class GeminiClient:
         self.api_key = api_key.strip()
         self.model = model
         self.cancel = cancel if cancel is not None else threading.Event()
+        self.retry_service_errors = True
         self.retry_rate_limit = retry_rate_limit
         self.log = lambda _: None
         if not self.api_key:
@@ -165,7 +166,7 @@ class GeminiClient:
                 except (ValueError, AttributeError):
                     detail = ""
                 if (
-                    exc.code in (500, 502, 503, 504)
+                    exc.code in (500, 502, 503, 504) and self.retry_service_errors
                     or exc.code == 429
                     and self.retry_rate_limit
                 ) and attempt < 2:

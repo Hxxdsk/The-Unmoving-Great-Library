@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 from PIL import Image, ImageOps
+from playwright.sync_api import Error as BrowserError
 
 from .models import ListingError, Cancelled, SaveUncertain
 from .browser import ENTRY_URL
@@ -29,6 +30,7 @@ class DouyinPage:
         self.editor_url = ""
         self.details_prepared = False
         self.batch_applied = False
+        self.generation_pending = False
         self.spec_cache = {}
         self.spec_layouts = {}
         self.client = client
@@ -60,11 +62,24 @@ class DouyinPage:
 
     def wait(self, condition, message, timeout=45):
         deadline = time.monotonic() + timeout
+        next_report = time.monotonic() + 15
         while time.monotonic() < deadline:
             self.check()
-            if condition():
-                self.confirm_memory()
-                return
+            if time.monotonic() >= next_report:
+                self.log("仍在等待页面处理：" + message)
+                next_report = time.monotonic() + 15
+            try:
+                if condition():
+                    self.confirm_memory()
+                    return
+            except BrowserError as exc:
+                if self.page.is_closed() or not re.search(
+                    r"Execution context was destroyed|Cannot find context|Frame was detached|not attached|detached from|Cannot adopt",
+                    str(exc),
+                    re.I,
+                ):
+                    raise
+                # React/navigation can invalidate one observation, not the task.
             if self.cancel.wait(0.25):
                 self.check()
         raise ListingError(message)
@@ -556,7 +571,10 @@ class DouyinPage:
         if self.dom("section", "主图3:4") or self.dom("section", "主图3：4"):
             self.editor_url = self.page.url
             return "editor"
-        if self.dom("creation_upload"):
+        if (
+            self.dom("creation_upload")
+            or self.visible_control(re.compile(r"^下一步.*生成商品")) is not None
+        ):
             return "upload"
         if self.dom("recommendations") or (
             self.visible_control(re.compile(r"确认信息.*继续生成|^继续生成$"))
@@ -579,6 +597,23 @@ class DouyinPage:
         return "list"
 
     def navigation_wait(self, condition, message, timeout=30):
+        if self.generation_pending:
+            # A submitted generation can take minutes. Observe its result before
+            # replaying memory or asking AI to navigate/click generation again.
+            try:
+                self.wait(condition, message, timeout=timeout)
+                return
+            except Cancelled:
+                raise
+            except ListingError as exc:
+                detail = self.dom("upload_errors") or str(exc)
+                raise ListingError(
+                    "生成请求已提交但页面尚未完成："
+                    + detail
+                    + "；保留当前页，未重复生成"
+                ) from exc
+            finally:
+                self.generation_pending = False
         # Reuse the proven recovery path before waiting for a failed fixed step.
         key, before = "流程：" + message, page_key(self.page)
         if not condition() and self.memory:
@@ -906,6 +941,7 @@ class DouyinPage:
             try:
                 button.click(timeout=1500)
                 clicked_at = time.monotonic()
+                self.generation_pending = True
                 return True
             except Exception as exc:
                 if self.creation_state() in destinations:
@@ -928,6 +964,83 @@ class DouyinPage:
                 f"继续生成尚未就绪：{errors or str(exc)}；请检查图片是否上传成功及商品标题格式，未强制点击禁用按钮"
             ) from exc
 
+    def upload_creation_main(self, paths):
+        """Submit once when accepted; retry only an empty/failed upload field."""
+        paths = [str(path) for path in paths]
+        submitted = False
+        baseline_photos = 0
+        last_error = "尚未找到上传控件"
+        for attempt in range(3):
+            self.check()
+            if self.creation_state() in ("titles", "editor"):
+                return
+            files = self.dom("creation_files")
+            if files and files["selected"]:
+                submitted = True
+            if not submitted:
+                try:
+                    if files:
+                        baseline_photos = files.get("photos", 0)
+                        self.log(f"使用当前创建页文件控件上传 {len(paths)} 张主图")
+                        self.page.locator(files["selector"]).set_input_files(
+                            paths, timeout=8000
+                        )
+                    else:
+                        local = self.dom("creation_upload")
+                        target = (
+                            self.page.locator(local)
+                            if local
+                            else self.control("本地上传")
+                        )
+                        with self.page.expect_file_chooser(timeout=8000) as chooser:
+                            self.click_field(target)
+                        chooser.value.set_files(paths)
+                    submitted = True
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    last_error = str(exc).splitlines()[0]
+                    self.log("上传入口暂时变化，重读当前创建页：" + last_error)
+                    self.cancel.wait(0.5)
+                    continue
+
+            def ready():
+                state = self.creation_state()
+                if state in ("titles", "editor"):
+                    return True
+                button = self.visible_control(re.compile(r"^下一步.*"))
+                return (
+                    button is not None and button.is_enabled() and not self.dom("busy")
+                )
+
+            try:
+                self.wait(ready, "主图仍在上传或校验", timeout=60)
+                return
+            except Cancelled:
+                raise
+            except ListingError as exc:
+                last_error = str(exc)
+                files = self.dom("creation_files")
+                errors = self.dom("upload_errors") or ""
+                if errors:
+                    self.log("创建页上传提示：" + errors)
+                # A selected file or an active upload is evidence of acceptance.
+                # Keep polling it instead of uploading another duplicate batch.
+                submitted = bool(
+                    (
+                        files
+                        and (
+                            files["selected"]
+                            or files.get("photos", 0) > baseline_photos
+                        )
+                    )
+                    or self.dom("busy")
+                )
+                self.log(f"主图尚未就绪，保留当前页继续观察（{attempt + 1}/3）")
+        raise ListingError(
+            "创建页主图上传未完成：" + (self.dom("upload_errors") or last_error)
+        )
+
     def create(self, product):
         if not 2 <= len(product.title.strip()) <= 60:
             raise ListingError("请在货号旁填写2-60字商品标题。")
@@ -944,28 +1057,13 @@ class DouyinPage:
             self.reach_creation()
             state = self.creation_state()
             if state == "upload":
-                local_selector = self.dom("creation_upload")
-                local = (
-                    self.page.locator(local_selector)
-                    if local_selector
-                    else self.control("本地上传")
-                )
-                with self.page.expect_file_chooser(timeout=15000) as chooser:
-                    self.record_action(local)
-                    local.click(timeout=8000)
-                chooser.value.set_files([str(path) for path in product.main])
+                self.upload_creation_main(product.main)
                 uploaded = True
-                self.wait(
-                    lambda: not self.dom("busy")
-                    and (
-                        self.visible_control(re.compile("下一步")) is None
-                        or self.visible_control(re.compile("下一步")).is_enabled()
-                    ),
-                    "商品主图上传未完成",
-                    timeout=90,
-                )
                 self.phase = "800主图已上传，进入网站推荐标题或商品编辑页"
-                self.click_generation(re.compile(r"^下一步.*"), ("titles", "editor"))
+                if self.creation_state() == "upload":
+                    self.click_generation(
+                        re.compile(r"^下一步.*"), ("titles", "editor")
+                    )
                 self.navigation_wait(
                     lambda: self.creation_state() in ("titles", "editor"),
                     "等待网站生成标题或编辑页",
@@ -977,7 +1075,7 @@ class DouyinPage:
                 if product.images.get("颜色"):
                     self.replace_images(("商品详情",), product.images["颜色"])
                 self.wait(
-                    lambda: not self.dom("busy"),
+                    lambda: not self.dom("busy", selector=self.section("商品详情")),
                     "颜色图片尚未上传完成",
                     timeout=90,
                 )

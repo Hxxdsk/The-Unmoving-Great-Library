@@ -113,9 +113,6 @@ class BatchRunner:
                             prefix="greatlibrary-listing-"
                         ) as temp:
                             advance("从新页面上传主图并生成商品", 5)
-                            prepare_color_sources(
-                                self.client, product, self.cancel, page.log
-                            )
                             page.create(product)
                             advance("按页面顺序填写图文信息", 25)
                             page.tab("图文信息")
@@ -149,6 +146,9 @@ class BatchRunner:
                             advance("识别颜色正面图、尺码与体重", 50)
                             page.ship_48h()
                             page.ensure_color_first()
+                            prepare_color_sources(
+                                self.client, product, self.cancel, page.log
+                            )
                             _, colors = page.specs("颜色分类")
                             analysis = analyze(
                                 self.client,

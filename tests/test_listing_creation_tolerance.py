@@ -108,3 +108,96 @@ def test_nested_nonbutton_local_upload_is_recognized(tmp_path, session):
         page.create(product)
         assert "/edit" in page.editor_url
         assert any(e["event"] == "wizard" for e in s.page.evaluate("audit"))
+
+
+def test_upload_uses_current_file_input_and_ignores_unrelated_spinner(
+    tmp_path, session
+):
+    product = make_product(tmp_path)
+    with session as s:
+        fixture_route(
+            s,
+            """<script>
+        const oldWizard=wizard;wizard=()=>{oldWizard();
+          const local=[...app.querySelectorAll('button')].find(e=>e.textContent==='本地上传');
+          local.onclick=()=>{throw Error('文件选择按钮不可用，应该直接上传当前文件控件')};
+          const file=document.querySelector('#wizard'),next=[...app.querySelectorAll('button')].find(e=>/下一步/.test(e.textContent));
+          next.disabled=true;const original=file.onchange;
+          file.onchange=()=>{original.call(file);file.remove();local.remove();setTimeout(()=>next.disabled=false,150)};
+          document.body.insertAdjacentHTML('beforeend','<aside aria-busy="true">无关助手加载中</aside>');
+        };list=()=>wizard();list();</script>""",
+        )
+        page = DouyinPage(s, threading.Event())
+        page.create(product)
+        assert "/edit" in page.editor_url
+        uploads = [e for e in s.page.evaluate("audit") if e["event"] == "wizard"]
+        assert len(uploads) == 1 and len(uploads[0]["files"]) == 5
+
+
+def test_wait_reobserves_after_transient_react_context_error(session):
+    from playwright.sync_api import Error as BrowserError
+
+    with session as s:
+        s.check_login()
+        page = DouyinPage(s, threading.Event())
+        observations = []
+
+        def condition():
+            observations.append(1)
+            if len(observations) < 3:
+                raise BrowserError("Execution context was destroyed during navigation")
+            return True
+
+        page.wait(condition, "页面仍在加载", timeout=3)
+        assert len(observations) == 3
+
+
+def test_pending_generation_polls_result_without_replaying_creation_memory(session):
+    with session as s:
+        s.check_login()
+        page = DouyinPage(s, threading.Event())
+        page.generation_pending = True
+
+        class ForbiddenMemory:
+            def recipes(self, *args):
+                raise AssertionError("已提交生成时不能重放创建动作")
+
+        page.memory = ForbiddenMemory()
+        observed = []
+
+        def ready():
+            observed.append(1)
+            return len(observed) >= 3
+
+        page.navigation_wait(ready, "等待生成结果", timeout=3)
+        assert len(observed) == 3
+        assert not page.generation_pending
+
+
+def test_color_classification_waits_until_after_creation(tmp_path, session):
+    from contextlib import nullcontext
+    from suite.listing.runner import BatchRunner
+    from suite.listing.browser import BrowserConfig
+    from test_listing import Client
+
+    product = make_product(tmp_path)
+    with session as s:
+
+        class EditorOnlyClient(Client):
+            def generate(self, parts, schema):
+                if "reference_ids" in schema.get("properties", {}):
+                    assert s.page.locator("#sku").input_value() == product.sku
+                    assert any(
+                        e["event"] == "generation" for e in s.page.evaluate("audit")
+                    )
+                return super().generate(parts, schema)
+
+        results = BatchRunner(
+            tmp_path,
+            [product],
+            BrowserConfig(),
+            EditorOnlyClient(),
+            threading.Event(),
+            session_factory=lambda *_: nullcontext(s),
+        ).run()
+        assert results == [(product.sku, "已保存")]

@@ -142,6 +142,20 @@
     const toggle=group?.querySelector('[role=switch][aria-checked=true],input[type=checkbox]:checked');
     return toggle?{close:mark(toggle)}:{blocked:true,preview:true};
   }
+  if(op==='creation_files'){
+    const local=[...root.querySelectorAll('button,[role=button],a,label,span,div')]
+      .filter(e=>visible(e)&&norm(e.innerText)==='本地上传')
+      .sort((a,b)=>a.querySelectorAll('*').length-b.querySelectorAll('*').length)[0];
+    if(!local)return null;
+    let scope=null,inputs=[];
+    for(let p=local.parentElement;p;p=p.parentElement){
+      const found=[...p.querySelectorAll('input[type=file]')].filter(e=>!e.disabled&&!e.closest('aside,[role=dialog]'));
+      if(found.length===1){scope=p;inputs=found;break;}
+      if(found.length>1)break;
+    }
+    const input=inputs[0];
+    return input?{selector:mark(input),selected:input.files?.length||0,photos:photos(scope).length,scope:mark(scope)}:null;
+  }
   if (op === 'creation_upload') {
     // Detect the actual empty upload wizard, independently of a hovered menu
     // or unrelated AI recommendation cards elsewhere on the page.
@@ -197,7 +211,9 @@
     return rows.length?mark(rows[0].e):null;
   }
   if (op === 'photos') return photos(root).map(mark);
-  if (op === 'busy') return [...root.querySelectorAll('[aria-busy=true],[class*=uploading],[class*=Uploading],.ant-spin-spinning')].some(visible);
+  if(op==='upload_errors')return [...root.querySelectorAll('[role=alert],[aria-invalid=true],[class*=error],[class*=Error]')]
+    .filter(visible).map(e=>(e.innerText||e.getAttribute('aria-label')||'').trim()).filter(t=>t&&t.length<200).slice(0,5).join('；');
+  if (op === 'busy') return [...root.querySelectorAll('[aria-busy=true],[class*=uploading],[class*=Uploading],.ant-spin-spinning')].some(e=>visible(e)&&!e.closest('aside,[role=tooltip],[class*=assistantContent],[class*=AssistantContent]'));
   if (op === 'input') {
     const inputs = [...root.querySelectorAll('input,textarea')].filter(e => visible(e) && !['hidden','file','radio','checkbox','password'].includes(e.type));
     return inputs.length === 1 ? mark(inputs[0]) : null;

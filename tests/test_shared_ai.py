@@ -322,3 +322,115 @@ def test_tk_tools_have_only_ai_switch_and_use_shared_client():
         root.destroy()
         del panel
         gc.collect()
+
+
+@pytest.mark.parametrize(
+    "other", ["models/gemini-2.5-pro", "models/gemini-flash-latest"]
+)
+def test_listing_falls_back_to_vision_model_when_current_model_keys_are_limited(
+    pool, other
+):
+    for entry in pool.snapshot()["entries"]:
+        pool.detected(
+            entry["id"],
+            [
+                {"name": MODEL},
+                {"name": other},
+                {"name": "models/gemini-2.5-native-audio"},
+            ],
+        )
+    client = shared_client(pool=pool, vision_fallback=True)
+    client.wait_budget = 0
+
+    def respond(request, **kwargs):
+        if MODEL in request.full_url:
+            raise http_error()
+        return success({"ok": True})
+
+    parts = [
+        {"text": "same task"},
+        {"inlineData": {"mimeType": "image/png", "data": "same-image"}},
+    ]
+    with patch("urllib.request.urlopen", side_effect=respond) as request:
+        assert client.generate(parts, {"type": "OBJECT"}) == {"ok": True}
+    calls = [c.args[0] for c in request.call_args_list]
+    assert len(calls) == 3
+    assert all(MODEL in c.full_url for c in calls[:2])
+    assert other in calls[-1].full_url
+    assert all(json.loads(c.data)["contents"][0]["parts"] == parts for c in calls)
+    assert client.working_model == other and pool.snapshot()["model"] == MODEL
+    assert pool.acquire(other, [])["id"] in [
+        e["id"] for e in pool.snapshot()["entries"]
+    ]
+
+
+@pytest.mark.parametrize("failure", ["service", "empty"])
+def test_listing_official_service_error_or_incomplete_output_can_change_model(
+    pool, failure
+):
+    other = "models/gemini-2.5-flash"
+    for entry in pool.snapshot()["entries"]:
+        pool.detected(entry["id"], [{"name": MODEL}, {"name": other}])
+    client = shared_client(pool=pool, vision_fallback=True)
+    client.wait_budget = 0
+
+    def respond(request, **kwargs):
+        if MODEL in request.full_url:
+            if failure == "service":
+                raise http_error(503)
+            return io.BytesIO(b'{"candidates":[{"finishReason":"MAX_TOKENS"}]}')
+        return success()
+
+    with patch("urllib.request.urlopen", side_effect=respond) as request:
+        assert client.generate([{"text": "image task"}], {"type": "OBJECT"}) == {
+            "ok": True
+        }
+    assert request.call_count == (3 if failure == "service" else 2)
+    assert client.working_model == other
+
+
+def test_cooldown_is_per_api_and_model_and_is_shared_by_broker(pool):
+    other = "models/gemini-2.5-flash"
+    entry = pool.snapshot()["entries"][0]
+    pool.detected(entry["id"], [{"name": MODEL}, {"name": other}])
+    pool.cooldown(entry["id"], 120, MODEL)
+    broker = PoolBroker(pool)
+    try:
+        remote = RemotePool(broker.url, broker.token)
+        assert remote.acquire(other, [])["id"] == entry["id"]
+        assert remote.ready_after([other]) == 0
+    finally:
+        broker.close()
+
+
+def test_listing_polls_short_resource_cooldown_without_losing_request(pool):
+    now = [1000.0]
+    pool.clock = lambda: now[0]
+
+    class PollCancel:
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            assert 0 <= seconds <= 1
+            now[0] += seconds
+            return False
+
+    messages = []
+    client = shared_client(
+        cancel=PollCancel(), log=messages.append, pool=pool, vision_fallback=True
+    )
+    client.wait_budget = 20
+    with patch("suite.shared_ai.time.monotonic", side_effect=lambda: now[0]), patch(
+        "urllib.request.urlopen",
+        side_effect=[http_error(retry=1), http_error(retry=1), success()],
+    ) as request:
+        assert client.generate([{"text": "same image"}], {"type": "OBJECT"}) == {
+            "ok": True
+        }
+    assert request.call_count == 3
+    assert any("轮询" in message for message in messages)
+    assert all(
+        json.loads(c.args[0].data)["contents"][0]["parts"] == [{"text": "same image"}]
+        for c in request.call_args_list
+    )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -155,7 +156,9 @@ class PoolManager:
                 self.data["preferred"] = next(
                     (e["id"] for e in self.data["entries"]), ""
                 )
-            self.cooldowns.pop(identifier, None)
+            self.cooldowns = {
+                k: v for k, v in self.cooldowns.items() if k[0] != identifier
+            }
             self.cursors.clear()
             self.persist()
 
@@ -202,14 +205,17 @@ class PoolManager:
             for entry in candidates:
                 if (
                     entry["id"] not in excluded
-                    and self.cooldowns.get(entry["id"], 0) <= now
+                    and self.cooldowns.get((entry["id"], model), 0) <= now
                 ):
                     return dict(entry)
             remaining = max(
                 1,
                 int(
                     min(
-                        (self.cooldowns.get(e["id"], now + 60) for e in candidates),
+                        (
+                            self.cooldowns.get((e["id"], model), now + 60)
+                            for e in candidates
+                        ),
                         default=now + 60,
                     )
                     - now
@@ -221,8 +227,8 @@ class PoolManager:
 
     def cooldown(self, identifier, seconds, model):
         with self.lock:
-            self.cooldowns[identifier] = max(
-                self.cooldowns.get(identifier, 0),
+            self.cooldowns[(identifier, model)] = max(
+                self.cooldowns.get((identifier, model), 0),
                 self.clock() + min(86400, max(1, seconds)),
             )
             entries = [e for e in self.data["entries"] if model in e["models"]]
@@ -231,6 +237,19 @@ class PoolManager:
             )
             if entries:
                 self.cursors[model] = entries[(index + 1) % len(entries)]["id"]
+
+    def ready_after(self, models):
+        with self.lock:
+            now = self.clock()
+            return min(
+                (
+                    max(0, self.cooldowns.get((e["id"], m), 0) - now)
+                    for e in self.data["entries"]
+                    for m in models
+                    if m in e["models"]
+                ),
+                default=0,
+            )
 
 
 class PoolBroker:
@@ -258,6 +277,8 @@ class PoolBroker:
                         result = manager.snapshot()
                     elif self.path == "/acquire":
                         result = manager.acquire(args["model"], args["excluded"])
+                    elif self.path == "/ready_after":
+                        result = manager.ready_after(args["models"])
                     elif self.path == "/cooldown":
                         manager.cooldown(
                             args["id"], float(args["seconds"]), args["model"]
@@ -328,14 +349,18 @@ class RemotePool:
     def acquire(self, model, excluded):
         return self.call("acquire", model=model, excluded=list(excluded))
 
+    def ready_after(self, models):
+        return self.call("ready_after", models=list(models))
+
     def cooldown(self, identifier, seconds, model):
         self.call("cooldown", id=identifier, seconds=seconds, model=model)
 
 
 class RotatingGeminiClient(GeminiClient):
-    def __init__(self, pool, model, cancel=None, log=None):
+    def __init__(self, pool, model, cancel=None, log=None, recover_services=False):
         super().__init__("pool-managed", model, cancel)
         self.pool = pool
+        self.recover_services = recover_services
         self.log = log or (lambda message: None)
 
     def _request(self, method, path, payload=None):
@@ -350,16 +375,106 @@ class RotatingGeminiClient(GeminiClient):
             client = GeminiClient(
                 entry["key"], self.model, self.cancel, retry_rate_limit=False
             )
+            client.retry_service_errors = not self.recover_services
             client.log = self.log
             try:
                 return client._request(method, path, payload)
             except GeminiHTTPError as exc:
-                if exc.status != 429:
+                if exc.status != 429 and not (
+                    self.recover_services
+                    and exc.status in (401, 403, 500, 502, 503, 504)
+                ):
                     raise
-                self.pool.cooldown(entry["id"], exc.retry_after, self.model)
+                delay = exc.retry_after if exc.status == 429 else 15
+                self.pool.cooldown(entry["id"], delay, self.model)
                 self.log(
-                    f"{entry['name']} 达到额度/速率上限，冷却 {int(exc.retry_after)} 秒；尝试下一条支持当前模型的 API。"
+                    f"{entry['name']} 当前模型 HTTP {exc.status}，冷却 {int(delay)} 秒；尝试下一条支持当前模型的 API。"
                 )
+
+
+class ResilientVisionClient(RotatingGeminiClient):
+    """Listing-only fallback; never changes the user's selected global model."""
+
+    wait_budget = 180
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.working_model = self.model
+        self.model_pauses = {}
+
+    def generate(self, parts, schema):
+        deadline = time.monotonic() + self.wait_budget
+        errors = []
+        while True:
+            self.check_cancel()
+            detected = {m for e in self.pool.snapshot()["entries"] for m in e["models"]}
+            alternatives = sorted(
+                m
+                for m in detected
+                if re.match(
+                    r"^models/gemini-(?:[2-9][.-]|1\.5[.-]|(?:flash|pro)(?:-lite)?-latest$)",
+                    m,
+                )
+                and not re.search(
+                    r"embedding|tts|audio|live|image|robotics|computer-use", m, re.I
+                )
+            )
+            models = list(
+                dict.fromkeys([self.working_model, self.model] + alternatives)
+            )
+            models = [m for m in models if m in detected]
+            for model in models:
+                self.check_cancel()
+                if self.model_pauses.get(model, 0) > time.monotonic():
+                    continue
+                client = RotatingGeminiClient(
+                    self.pool, model, self.cancel, self.log, recover_services=True
+                )
+                try:
+                    result = client.generate(parts, schema)
+                    if model != self.working_model:
+                        self.log(
+                            f"已切换可用识图模型：{model}；继续当前步骤，主页模型不变"
+                        )
+                    self.working_model = model
+                    return result
+                except GeminiError as exc:
+                    self.check_cancel()
+                    if "无法连接 Gemini" in str(exc) or "无法读取工具箱主页" in str(
+                        exc
+                    ):
+                        raise
+                    errors.append(str(exc))
+                    self.log(
+                        f"识图模型 {model} 暂未完成：{exc}；检查其他可用 API/识图模型"
+                    )
+                    # Quotas/services are already shared per API/model. Invalid
+                    # output gets a short local pause instead of a tight loop.
+                    self.model_pauses[model] = time.monotonic() + 15
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not models:
+                break
+            cooldown = self.pool.ready_after(models)
+            local_wait = min(
+                (
+                    max(0, self.model_pauses.get(m, 0) - time.monotonic())
+                    for m in models
+                ),
+                default=0,
+            )
+            delay = max(cooldown, local_wait)
+            if delay > remaining:
+                break
+            self.log(
+                f"可用识图资源暂在冷却，保留当前步骤并轮询，约 {max(1, int(delay))} 秒后重试"
+            )
+            until = time.monotonic() + max(1, delay)
+            while time.monotonic() < until:
+                if self.cancel.wait(min(1, until - time.monotonic())):
+                    self.check_cancel()
+        raise GeminiError(
+            "当前已检测的 API/识图模型均未完成请求；" + "；".join(errors[-3:])
+        )
 
 
 _standalone = None
@@ -381,10 +496,11 @@ def shared_pool():
     return _standalone
 
 
-def shared_client(cancel=None, log=None, pool=None):
+def shared_client(cancel=None, log=None, pool=None, vision_fallback=False):
     pool = pool or shared_pool()
     snapshot = pool.snapshot()
     model = snapshot.get("model", "")
     if not model or not any(model in e["models"] for e in snapshot["entries"]):
         raise GeminiError("请在工具箱主页配置 API 并检测、选择模型。")
-    return RotatingGeminiClient(pool, model, cancel, log)
+    cls = ResilientVisionClient if vision_fallback else RotatingGeminiClient
+    return cls(pool, model, cancel, log)

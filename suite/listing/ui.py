@@ -457,7 +457,7 @@ class ListingWindow(QMainWindow):
             self.error("此工具需要 AI 识别颜色与尺码，请开启 AI。")
             return
         try:
-            client = shared_client()
+            client = shared_client(vision_fallback=True)
             config = self.browser_config()
             memory = WorkflowStore(
                 self.workflow_path, self.workflow_profile.currentText()
