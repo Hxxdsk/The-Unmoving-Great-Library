@@ -14,15 +14,15 @@ const chrome = {
   windows: {
     async create(options) {
       calls.push({op:'window-create',options});
-      assert.equal(options.state,'minimized'); assert.equal(options.focused,false);
+      assert.equal(options.state,'maximized'); assert.equal(options.focused,false);
       assert.equal(options.width,undefined); assert.equal(options.height,undefined);
       const tab={id:++seq,windowId:100,url:options.url};tabs.set(tab.id,tab);
       return {id:100,tabs:[tab]};
     },
     async get(id) {assert.equal(id,100);return {id};},
     async update(id,options) {
-      assert.equal(id,100,'ordinary windows must never be minimized or focused');
-      assert.equal(options.state,'minimized');assert.equal(Object.keys(options).join(','),'state');
+      assert.equal(id,100,'ordinary windows must never be resized or focused');
+      assert.equal(options.state,'maximized');assert.equal(options.focused,false);assert.equal(Object.keys(options).sort().join(','),'focused,state');
       calls.push({op:'window-update',id});return {id,...options};
     }
   },
@@ -58,6 +58,7 @@ vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[2],'utf8'
   await vm.runInContext(`command({method:'Page.bringToFront',sessionId:'library-tab-${first.id}'})`,context);
   await vm.runInContext(`command({method:'Target.activateTarget',params:{targetId:'target-${first.id}'}})`,context);
   assert.equal(commands.length,commandsBefore,'focus commands must not be relayed');
+  assert(commands.some(c=>c.method==='Emulation.setDeviceMetricsOverride'&&c.params.width===1600&&c.params.height===1000&&c.params.mobile===false));
   assert(commands.some(c=>c.method==='Emulation.setFocusEmulationEnabled'&&c.params.enabled));
   assert(commands.some(c=>c.method==='Page.addScriptToEvaluateOnNewDocument'&&c.params.source.includes('window.focus')));
   console.log('background window, inactive tabs, owned popup routing, focus suppression: passed');

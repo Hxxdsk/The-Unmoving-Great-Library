@@ -29,7 +29,7 @@ const chrome = {
     sendCommand(target, method, params) {return call(method, params, target.sessionId || roots.get(target.tabId));}},
   windows: {
     async create({url, type, focused, state}) {
-      if(type !== 'normal' || focused !== false || state !== 'minimized') throw new Error('work window must be ordinary and unfocused');
+      if(type !== 'normal' || focused !== false || state !== 'maximized') throw new Error('work window must be ordinary and unfocused');
       const result=await call('Target.createTarget',{url,newWindow:true,background:true});
       const {windowId}=await call('Browser.getWindowForTarget',{targetId:result.targetId});
       workWindows.add(windowId);
@@ -37,7 +37,7 @@ const chrome = {
       return {id:windowId,tabs:[{id,url,windowId}]};
     },
     async get(id) {if(![...tabWindows.values()].includes(id))throw new Error('window closed');return {id};},
-    async update(id, options) {if(!workWindows.has(id)||options.state!=='minimized'||options.focused)throw new Error('cannot activate or alter ordinary windows');return {id,state:'minimized'};}
+    async update(id, options) {if(!workWindows.has(id)||options.state!=='maximized'||options.focused)throw new Error('cannot activate or alter ordinary windows');return {id,state:'maximized',focused:false};}
   },
   tabs: {onRemoved: tabRemoved, onUpdated: tabUpdated, onCreated: tabCreated,
     async create({url, windowId, active}) {if(windowId && active!==false)throw new Error('work tab must open inactive');const result = await call('Target.createTarget', {url, background:true, newWindow:!!windowId}); const id = ++tabSequence; tabs.set(id, result.targetId);tabWindows.set(id,windowId||1); return {id, url, windowId: windowId||1};},

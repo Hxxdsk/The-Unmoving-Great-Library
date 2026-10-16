@@ -25,11 +25,20 @@ const info = tab => ({targetId: targets.get(tab.id), browserContextId: 'edge-def
   url: tab.url || tab.pendingUrl || 'about:blank', attached: attached.has(tab.id), canAccessOpener: false,
   ...(owned.has(tab.openerTabId) ? {openerId: targets.get(tab.openerTabId)} : {})});
 
+async function keepBackgroundWindow() {
+  if (workWindow == null) return;
+  const window = await chrome.windows.get(workWindow);
+  if (window.state !== 'maximized' || window.focused) {
+    await chrome.windows.update(workWindow, {state: 'maximized', focused: false});
+  }
+}
 async function attach(tabId) {
   if (!owned.has(tabId)) throw new Error('禁止控制用户原有标签页');
   if (attached.has(tabId)) return;
   await chrome.debugger.attach({tabId}, '1.3');
   attached.add(tabId);
+  // Keep a full desktop layout even if OS visibility or display scaling changes.
+  await chrome.debugger.sendCommand({tabId}, 'Emulation.setDeviceMetricsOverride', {width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false, screenWidth: 1600, screenHeight: 1000}).catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Page.addScriptToEvaluateOnNewDocument', {source: noWindowFocus}).catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Runtime.evaluate', {expression: noWindowFocus}).catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
@@ -46,13 +55,12 @@ async function create(url = 'about:blank') {
   creating++;
   try {
   if (workWindow == null) {
-    // Start minimized: focused:false alone can still display a new OS window.
-    // Minimized windows cannot specify initial width/height in the Chrome API.
-    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'minimized'});
+    // Render at full size behind the current window; do not minimize or focus.
+    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'maximized'});
     workWindow = window.id;
     tab = await remember(window.tabs[0]);
   } else {
-    await chrome.windows.update(workWindow, {state: 'minimized'});
+    await keepBackgroundWindow();
     tab = await remember(await chrome.tabs.create({url, active: false, windowId: workWindow}));
   }
   } finally { creating--; }
@@ -147,14 +155,14 @@ chrome.tabs.onCreated.addListener(tab => {
   if (creating || (!owned.has(tab.openerTabId) && !(tab.windowId === workWindow && allowedUrl(tab.url || tab.pendingUrl)))) return;
   owned.add(tab.id);
   (async () => {
-    // Move only the owned child tab; never minimize the user's source window.
+    // Move only the owned child tab; never resize or focus the user's window.
     try {
       if (workWindow != null && tab.windowId !== workWindow) {
         await chrome.tabs.move(tab.id, {windowId: workWindow, index: -1});
       }
-      if (workWindow != null) await chrome.windows.update(workWindow, {state: 'minimized'});
+      await keepBackgroundWindow();
     } catch (error) {
-      console.warn('工作子页暂未收起：', error.message);
+      console.warn('工作子页暂未恢复后台最大化：', error.message);
     }
     await remember(tab);
     if (discover) event('Target.targetCreated', {targetInfo: info(await chrome.tabs.get(tab.id))});

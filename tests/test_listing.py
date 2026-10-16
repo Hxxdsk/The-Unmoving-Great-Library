@@ -1,4 +1,5 @@
 import json
+import io
 import shutil
 import threading
 from pathlib import Path
@@ -493,6 +494,9 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
                         body=FIXTURE.read_text(),
                     ),
                 )
+                assert self.page.evaluate("[innerWidth, innerHeight]") == [1600, 1000]
+                with Image.open(io.BytesIO(self.page.screenshot())) as capture:
+                    assert capture.size == (1600, 1000)
                 assert self.page.evaluate(
                     "[document.visibilityState, document.hasFocus()]"
                 ) == ["visible", True]
