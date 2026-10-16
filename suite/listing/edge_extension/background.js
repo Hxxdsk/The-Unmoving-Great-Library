@@ -1,5 +1,6 @@
 // A narrow CDP relay: expose only tabs created by this extension to Playwright.
 let socket = null, heartbeat = null, autoAttach = false, discover = false;
+const noWindowFocus = 'window.focus = () => {};';
 let workWindow = null, epoch = null, creating = 0, detaching = Promise.resolve();
 const owned = new Set(), attached = new Set(), children = new Map(), targets = new Map();
 const tabForTarget = targetId => [...targets].find(([tabId, id]) => id === targetId)?.[0];
@@ -29,6 +30,8 @@ async function attach(tabId) {
   if (attached.has(tabId)) return;
   await chrome.debugger.attach({tabId}, '1.3');
   attached.add(tabId);
+  await chrome.debugger.sendCommand({tabId}, 'Page.addScriptToEvaluateOnNewDocument', {source: noWindowFocus}).catch(() => {});
+  await chrome.debugger.sendCommand({tabId}, 'Runtime.evaluate', {expression: noWindowFocus}).catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Page.setWebLifecycleState', {state: 'active'}).catch(() => {});
   event('Target.attachedToTarget', {sessionId: sid(tabId), targetInfo: info(await chrome.tabs.get(tabId)), waitingForDebugger: false});
@@ -43,13 +46,14 @@ async function create(url = 'about:blank') {
   creating++;
   try {
   if (workWindow == null) {
-    // A normal window shares this profile's login, but activation of its tabs
-    // never changes the user's ordinary window. Do not focus the OS window.
-    const window = await chrome.windows.create({url, type: 'normal', focused: false, width: 1360, height: 1000});
+    // Start minimized: focused:false alone can still display a new OS window.
+    // Minimized windows cannot specify initial width/height in the Chrome API.
+    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'minimized'});
     workWindow = window.id;
     tab = await remember(window.tabs[0]);
   } else {
-    tab = await remember(await chrome.tabs.create({url, active: true, windowId: workWindow}));
+    await chrome.windows.update(workWindow, {state: 'minimized'});
+    tab = await remember(await chrome.tabs.create({url, active: false, windowId: workWindow}));
   }
   } finally { creating--; }
   owned.add(tab.id);
@@ -103,6 +107,10 @@ async function command(message) {
       if (!owned.has(id)) throw new Error('只能读取工具工作页');
       return {targetInfo: info(await chrome.tabs.get(id))};
     }
+    case 'Target.activateTarget': {
+      if (!owned.has(tabForTarget(params.targetId))) throw new Error('只能操作工具工作页');
+      return {}; // Logical page selection must never activate the OS window.
+    }
     case 'Target.createTarget': return {targetId: targets.get((await create(params.url)).id)};
     case 'Target.attachToTarget': {
       const id = tabForTarget(params.targetId); await attach(id); return {sessionId: sid(id)};
@@ -138,10 +146,20 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 chrome.tabs.onCreated.addListener(tab => {
   if (creating || (!owned.has(tab.openerTabId) && !(tab.windowId === workWindow && allowedUrl(tab.url || tab.pendingUrl)))) return;
   owned.add(tab.id);
-  remember(tab).then(() => {
-    if (discover) event('Target.targetCreated', {targetInfo: info(tab)});
-    if (autoAttach) return attach(tab.id);
-  }).catch(() => {});
+  (async () => {
+    // Move only the owned child tab; never minimize the user's source window.
+    try {
+      if (workWindow != null && tab.windowId !== workWindow) {
+        await chrome.tabs.move(tab.id, {windowId: workWindow, index: -1});
+      }
+      if (workWindow != null) await chrome.windows.update(workWindow, {state: 'minimized'});
+    } catch (error) {
+      console.warn('工作子页暂未收起：', error.message);
+    }
+    await remember(tab);
+    if (discover) event('Target.targetCreated', {targetInfo: info(await chrome.tabs.get(tab.id))});
+    if (autoAttach) await attach(tab.id);
+  })().catch(error => console.warn('工作子页尚未就绪：', error.message));
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type !== 'connect') return;

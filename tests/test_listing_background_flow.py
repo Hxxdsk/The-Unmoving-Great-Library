@@ -274,3 +274,28 @@ def test_title_input_is_per_product_persisted_and_has_correct_status_columns(tmp
         assert window.table.item(0, 9).text() == "明确保存成功"
     finally:
         window.close()
+
+
+def test_extension_keeps_new_work_pages_in_background():
+    import subprocess
+    from pathlib import Path
+    from suite.listing.bridge import EXTENSION_DIR
+
+    node = (
+        shutil.which("node")
+        or "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node"
+    )
+    if not Path(node).exists():
+        pytest.skip("后台窗口策略测试需要 Node")
+    result = subprocess.run(
+        [
+            node,
+            str(Path(__file__).parent / "fixtures" / "listing_background_policy.cjs"),
+            str(EXTENSION_DIR / "background.js"),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=True,
+    )
+    assert "focus suppression: passed" in result.stdout
