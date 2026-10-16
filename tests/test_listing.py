@@ -344,7 +344,8 @@ def test_edge_bridge_rejects_unpaired_and_foreign_origin():
         bridge.close()
 
 
-def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
+@pytest.mark.parametrize("background_popup", [False, True])
+def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popup):
     """Real Chromium + unchanged extension JS; Chrome APIs use a Node stand-in.
 
     This is not an installed-extension test: cloud policy blocks unpacked
@@ -484,6 +485,18 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
         activity = threading.Thread(target=ordinary_activity)
         activity.start()
 
+        popup_script = (
+            """<script>
+        if(location.pathname.includes('/g/create'))wizard();
+        else {
+          const entry=document.querySelector('#menu button');
+          if(entry)entry.onclick=()=>window.open('https://fxg.jinritemai.com/ffa/g/create','_blank').focus();
+        }
+        </script>"""
+            if background_popup
+            else ""
+        )
+
         class FixtureSession(EdgeSession):
             def __enter__(self):
                 super().__enter__()
@@ -491,7 +504,7 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
                     "**/*",
                     lambda route: route.fulfill(
                         content_type="text/html; charset=utf-8",
-                        body=FIXTURE.read_text(),
+                        body=FIXTURE.read_text() + popup_script,
                     ),
                 )
                 assert self.page.evaluate("[innerWidth, innerHeight]") == [1600, 1000]
@@ -522,7 +535,7 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path):
         def reconnect():
             try:
                 with FixtureSession(config, threading.Event()) as session:
-                    assert len(session.context.pages) == 1
+                    assert len(session.context.pages) == (2 if background_popup else 1)
                     session.check_login()
                     assert "fixture-login=already-logged-in" in session.page.evaluate(
                         "document.cookie"

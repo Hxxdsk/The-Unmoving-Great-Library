@@ -1,7 +1,38 @@
 // A narrow CDP relay: expose only tabs created by this extension to Playwright.
 let socket = null, heartbeat = null, autoAttach = false, discover = false;
-const noWindowFocus = 'window.focus = () => {};';
-let workWindow = null, epoch = null, creating = 0, detaching = Promise.resolve();
+const noWindowFocus = `(() => {
+  window.focus = () => {};
+  if (window.__greatLibraryBackgroundOpenInstalled) return;
+  window.__greatLibraryBackgroundOpenInstalled = true;
+  const nativeOpen = window.open;
+  const safeURL = value => {
+    try {
+      const url = new URL(String(value), location.href);
+      return url.protocol === 'https:' && url.hostname === 'fxg.jinritemai.com' ? url.href : null;
+    } catch (_) { return null; }
+  };
+  const openBackground = url => window.__greatLibraryOpenBackground(JSON.stringify({url}));
+  window.open = function(url, target, features) {
+    const resolved = url && safeURL(url);
+    if (resolved && (!target || target === '_blank') && typeof window.__greatLibraryOpenBackground === 'function') {
+      openBackground(resolved);
+      // Merchant creation links commonly call window.open(url).focus().
+      return {focus() {}, blur() {}, closed: false};
+    }
+    return nativeOpen.apply(this, arguments);
+  };
+  document.addEventListener('click', event => {
+    if (event.defaultPrevented || event.button !== 0) return;
+    const link = event.target?.closest?.('a[target="_blank"][href]');
+    const url = link && !link.hasAttribute('download') && safeURL(link.href);
+    if (url && typeof window.__greatLibraryOpenBackground === 'function') {
+      event.preventDefault();
+      openBackground(url);
+    }
+  });
+})();`;
+
+let workWindow = null, latestWorkTab = null, epoch = null, creating = 0, detaching = Promise.resolve();
 const owned = new Set(), attached = new Set(), children = new Map(), targets = new Map();
 const tabForTarget = targetId => [...targets].find(([tabId, id]) => id === targetId)?.[0];
 async function remember(tab) {
@@ -25,25 +56,12 @@ const info = tab => ({targetId: targets.get(tab.id), browserContextId: 'edge-def
   url: tab.url || tab.pendingUrl || 'about:blank', attached: attached.has(tab.id), canAccessOpener: false,
   ...(owned.has(tab.openerTabId) ? {openerId: targets.get(tab.openerTabId)} : {})});
 
-async function keepBackgroundWindow() {
-  if (workWindow == null) return;
-  const window = await chrome.windows.get(workWindow);
-  // Chromium rejects maximized/fullscreen combined with focused:false.
-  // A normal background window plus CDP desktop metrics keeps recognition full.
-  if (window.state === 'minimized' || window.width < 1600 || window.height < 1100) {
-    try {
-      await chrome.windows.update(workWindow, {state: 'normal', focused: false, width: 1600, height: 1100});
-    } catch (error) {
-      // A display/OS size restriction must not prevent attaching to a valid tab.
-      console.warn('后台窗口尺寸未调整，继续使用完整渲染视口：', error.message);
-    }
-  }
-}
 async function attach(tabId) {
   if (!owned.has(tabId)) throw new Error('禁止控制用户原有标签页');
   if (attached.has(tabId)) return;
   await chrome.debugger.attach({tabId}, '1.3');
   attached.add(tabId);
+  await chrome.debugger.sendCommand({tabId}, 'Runtime.addBinding', {name: '__greatLibraryOpenBackground'});
   // Keep a full desktop layout even if OS visibility or display scaling changes.
   await chrome.debugger.sendCommand({tabId}, 'Emulation.setDeviceMetricsOverride', {width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false, screenWidth: 1600, screenHeight: 1000}).catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Page.addScriptToEvaluateOnNewDocument', {source: noWindowFocus}).catch(() => {});
@@ -52,8 +70,9 @@ async function attach(tabId) {
   await chrome.debugger.sendCommand({tabId}, 'Page.setWebLifecycleState', {state: 'active'}).catch(() => {});
   event('Target.attachedToTarget', {sessionId: sid(tabId), targetInfo: info(await chrome.tabs.get(tabId)), waitingForDebugger: false});
 }
-async function create(url = 'about:blank') {
+async function create(url = 'about:blank', openerTabId = null) {
   if (!allowedUrl(url)) throw new Error('只允许新建抖店工作页');
+  if (openerTabId != null && !owned.has(openerTabId)) throw new Error('只能从工具工作页打开子页');
   let tab;
   if (workWindow != null) {
     try { await chrome.windows.get(workWindow); }
@@ -62,16 +81,18 @@ async function create(url = 'about:blank') {
   creating++;
   try {
   if (workWindow == null) {
-    // Use a background normal window: maximizing an unfocused window is invalid.
-    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'normal', width: 1600, height: 1100});
+    // Stay on the taskbar until the user chooses to view the work window.
+    // CDP desktop metrics keep screenshots complete while the OS window is hidden.
+    const window = await chrome.windows.create({url, type: 'normal', focused: false, state: 'minimized'});
     workWindow = window.id;
     tab = await remember(window.tabs[0]);
   } else {
-    await keepBackgroundWindow();
-    tab = await remember(await chrome.tabs.create({url, active: false, windowId: workWindow}));
+    // Never restore, resize, minimize or focus a window the user has opened.
+    tab = await remember(await chrome.tabs.create({url, active: false, windowId: workWindow, ...(openerTabId != null ? {openerTabId} : {})}));
   }
   } finally { creating--; }
   owned.add(tab.id);
+  latestWorkTab = tab.id;
   if (discover) event('Target.targetCreated', {targetInfo: info(tab)});
   if (autoAttach) await attach(tab.id);
   return tab;
@@ -141,6 +162,14 @@ async function command(message) {
 }
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!owned.has(source.tabId) || !attached.has(source.tabId)) return;
+  if (method === 'Runtime.bindingCalled' && params.name === '__greatLibraryOpenBackground') {
+    try {
+      const request = JSON.parse(params.payload);
+      if (!allowedUrl(request.url)) throw new Error('后台入口只能打开抖店工作页');
+      create(request.url, source.tabId).catch(error => console.warn('后台子页打开失败：', error.message));
+    } catch (error) { console.warn('后台子页请求无效：', error.message); }
+    return;
+  }
   if (method === 'Target.attachedToTarget') children.set(params.sessionId, source.tabId);
   if (method === 'Target.detachedFromTarget') children.delete(params.sessionId);
   event(method, params, source.sessionId || sid(source.tabId));
@@ -150,6 +179,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 chrome.tabs.onRemoved.addListener(tabId => {
   if (!owned.delete(tabId)) return;
+  if (latestWorkTab === tabId) latestWorkTab = [...owned].at(-1) ?? null;
   if (attached.delete(tabId)) event('Target.detachedFromTarget', {sessionId: sid(tabId), targetId: targets.get(tabId)});
   event('Target.targetDestroyed', {targetId: targets.get(tabId)});
   targets.delete(tabId);
@@ -161,13 +191,14 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 chrome.tabs.onCreated.addListener(tab => {
   if (creating || (!owned.has(tab.openerTabId) && !(tab.windowId === workWindow && allowedUrl(tab.url || tab.pendingUrl)))) return;
   owned.add(tab.id);
+  latestWorkTab = tab.id;
   (async () => {
     // Move only the owned child tab; never resize or focus the user's window.
     try {
       if (workWindow != null && tab.windowId !== workWindow) {
         await chrome.tabs.move(tab.id, {windowId: workWindow, index: -1});
       }
-      await keepBackgroundWindow();
+      // Preserve the current taskbar/user-visible state; never auto-restore.
     } catch (error) {
       console.warn('工作子页暂未恢复后台窗口：', error.message);
     }
@@ -175,6 +206,13 @@ chrome.tabs.onCreated.addListener(tab => {
     if (discover) event('Target.targetCreated', {targetInfo: info(await chrome.tabs.get(tab.id))});
     if (autoAttach) await attach(tab.id);
   })().catch(error => console.warn('工作子页尚未就绪：', error.message));
+});
+// The user chose this window (for example via the taskbar): show its current
+// work tab without ever requesting OS activation ourselves.
+chrome.windows.onFocusChanged.addListener(windowId => {
+  if (windowId === workWindow && owned.has(latestWorkTab)) {
+    chrome.tabs.update(latestWorkTab, {active: true}).catch(() => {});
+  }
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type !== 'connect') return;

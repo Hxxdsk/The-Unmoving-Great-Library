@@ -3,7 +3,7 @@
 const fs = require('node:fs'), vm = require('node:vm');
 const [source, realEndpoint, port, token] = process.argv.slice(2);
 const ws = new WebSocket(realEndpoint), pending = new Map();
-const tabWindows = new Map(), workWindows = new Set();
+const tabWindows = new Map(), workWindows = new Set(), tabOpeners = new Map();
 const tabs = new Map(), roots = new Map(), rootTabs = new Map();
 let sequence = 0, tabSequence = 0;
 const hook = () => ({handlers: [], addListener(fn) {this.handlers.push(fn);}, emit(...args) {for (const fn of this.handlers) fn(...args);}});
@@ -28,8 +28,9 @@ const chrome = {
     async detach({tabId}) {const sessionId = roots.get(tabId); roots.delete(tabId); rootTabs.delete(sessionId); if (sessionId) await call('Target.detachFromTarget', {sessionId});},
     sendCommand(target, method, params) {return call(method, params, target.sessionId || roots.get(target.tabId));}},
   windows: {
+    onFocusChanged: hook(),
     async create({url, type, focused, state}) {
-      if(type !== 'normal' || focused !== false || state !== 'normal') throw new Error('work window must be ordinary and unfocused');
+      if(type !== 'normal' || focused !== false || state !== 'minimized') throw new Error('work window must be ordinary and unfocused');
       const result=await call('Target.createTarget',{url,newWindow:true,background:true});
       const {windowId}=await call('Browser.getWindowForTarget',{targetId:result.targetId});
       workWindows.add(windowId);
@@ -40,8 +41,9 @@ const chrome = {
     async update(id, options) {if(!workWindows.has(id)||options.state!=='normal'||options.focused)throw new Error('cannot activate or alter ordinary windows');return {id,state:'normal',focused:false,width:1600,height:1100};}
   },
   tabs: {onRemoved: tabRemoved, onUpdated: tabUpdated, onCreated: tabCreated,
-    async create({url, windowId, active}) {if(windowId && active!==false)throw new Error('work tab must open inactive');const result = await call('Target.createTarget', {url, background:true, newWindow:!!windowId}); const id = ++tabSequence; tabs.set(id, result.targetId);tabWindows.set(id,windowId||1); return {id, url, windowId: windowId||1};},
-    async get(id) {const result = await call('Target.getTargetInfo', {targetId: tabs.get(id)}); return {id, url: result.targetInfo.url, title: result.targetInfo.title, windowId: tabWindows.get(id)};},
+    async create({url, windowId, active, openerTabId}) {if(windowId && active!==false)throw new Error('work tab must open inactive');const result = await call('Target.createTarget', {url, background:true, newWindow:!!windowId}); const id = ++tabSequence; tabs.set(id, result.targetId);tabWindows.set(id,windowId||1);if(openerTabId!=null)tabOpeners.set(id,openerTabId); return {id, url, windowId: windowId||1,openerTabId};},
+    async update(id, options) {return this.get(id);},
+    async get(id) {const result = await call('Target.getTargetInfo', {targetId: tabs.get(id)}); return {id, url: result.targetInfo.url, title: result.targetInfo.title, windowId: tabWindows.get(id),openerTabId:tabOpeners.get(id)};},
     async remove(id) {await call('Target.closeTarget', {targetId: tabs.get(id)});}}
 };
 ws.onopen = async () => {
