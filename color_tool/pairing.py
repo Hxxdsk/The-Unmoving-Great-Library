@@ -2,6 +2,7 @@
 
 import copy
 import math
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 
 from .data import apply_suggestions, color_candidates, color_key, ValidationError
@@ -143,15 +144,144 @@ def validate_batch(data, filenames, table_colors):
     return labels, matches, alternatives
 
 
+def _name(value, candidates, *, filename=False):
+    if not isinstance(value, str):
+        return None
+    value = unicodedata.normalize("NFKC", value).strip().strip("\"'`")
+    if filename:
+        value = value.replace("\\", "/").rsplit("/", 1)[-1]
+        key = lambda name: unicodedata.normalize("NFKC", name).casefold()
+    else:
+        key = color_key
+    exact = [name for name in candidates if name == value]
+    matches = exact or [name for name in candidates if key(name) == key(value)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _confidence(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        percent = isinstance(value, str) and value.strip().endswith(("%", "％"))
+        number = float(str(value).strip().rstrip("%％"))
+        if percent or (number > 1 and number.is_integer() and number <= 100):
+            number /= 100
+        return number if math.isfinite(number) and 0 <= number <= 1 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def normalize_batch(data, filenames, table_colors):
+    """Recover unambiguous formatting only; conflicting identities are re-read."""
+    if not isinstance(data, dict) or not isinstance(data.get("colors"), list):
+        raise GeminiError("颜色总览缺少colors列表")
+    labels = []
+    for row in data["colors"]:
+        label = row.get("label") if isinstance(row, dict) else row
+        if not isinstance(label, str) or not label.strip():
+            continue
+        label = unicodedata.normalize("NFKC", label).strip()
+        if label in ("正面", "背面", "侧面", "公版"):
+            continue
+        if not _name(label, labels):
+            labels.append(label)
+    if not labels:
+        raise GeminiError("总览没有读到实际颜色名称（正面/背面不是颜色）")
+    matches, conflicts, notes = {}, set(), []
+    rows = data.get("images")
+    if not isinstance(rows, list):
+        raise GeminiError("缺少images图片识别列表")
+    for row in rows:
+        if not isinstance(row, dict):
+            notes.append("图片结果不是对象")
+            continue
+        filename = _name(row.get("filename"), filenames, filename=True)
+        if filename is None:
+            notes.append(f"未知文件：{str(row.get('filename'))[:100]}")
+            continue
+        label = _name(row.get("color_label"), labels)
+        confidence = _confidence(row.get("confidence"))
+        if label is None or confidence is None:
+            notes.append(
+                f"{filename}：颜色未对应总览或置信度无效（{str(row.get('color_label'))[:60]} / {str(row.get('confidence'))[:30]}）"
+            )
+            conflicts.add(filename)
+            continue
+        review = row.get("needs_review", True)
+        if isinstance(review, str) and review.strip().lower() in ("true", "false"):
+            review = review.strip().lower() == "true"
+        if not isinstance(review, bool):
+            review = True
+        reason = row.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            reason, review = "未提供图像依据，请核对", True
+        normalized = dict(
+            filename=filename,
+            color_label=label,
+            main_color=(
+                row.get("main_color")
+                if isinstance(row.get("main_color"), str)
+                else label
+            ),
+            confidence=confidence,
+            needs_review=review,
+            reason=reason,
+        )
+        if filename in matches:
+            previous = matches[filename]
+            if previous["color_label"] != label:
+                conflicts.add(filename)
+                notes.append(f"{filename}：同一原图返回不同颜色，需重新识别")
+            else:
+                previous["confidence"] = min(previous["confidence"], confidence)
+                previous["needs_review"] |= review
+        else:
+            matches[filename] = normalized
+    for filename in conflicts:
+        matches.pop(filename, None)
+    alternatives = []
+    for row in (
+        data.get("alternatives", [])
+        if isinstance(data.get("alternatives", []), list)
+        else []
+    ):
+        if not isinstance(row, dict):
+            continue
+        filename = _name(row.get("filename"), list(matches), filename=True)
+        table_color = _name(row.get("table_color"), table_colors)
+        chart_label = _name(row.get("chart_label"), labels)
+        confidence = _confidence(row.get("confidence"))
+        if (
+            filename
+            and table_color
+            and chart_label
+            and confidence is not None
+            and chart_label == matches[filename]["color_label"]
+            and isinstance(row.get("reason"), str)
+        ):
+            alternatives.append(
+                dict(
+                    row,
+                    filename=filename,
+                    table_color=table_color,
+                    chart_label=chart_label,
+                    confidence=confidence,
+                )
+            )
+        else:
+            notes.append("忽略无效异名建议，保留有效的同名配对")
+    return labels, matches, alternatives, notes
+
+
 def analyze(client, style, log, force=False, cache=None):
     if style.issues or style.ai_issues or not style.chart:
         raise ValidationError(
             "；".join(style.issues + style.ai_issues)
             or "AI 需要颜色图；可直接手动配对。"
         )
-    cache = cache or ResultCache("color-v2")
+    cache = cache or ResultCache("color-v3")
     key = cache.key(
-        {"version": 2, "model": client.model, "table_colors": list(style.colors)},
+        {"version": 3, "model": client.model, "table_colors": list(style.colors)},
         [style.chart, *style.images],
     )
     batches = [
@@ -175,6 +305,9 @@ def analyze(client, style, log, force=False, cache=None):
             "第一张是颜色总览，其后是商品原图，各有准确文件名。每个颜色只有一张原图，不可重复使用。"
             "读取总览印刷颜色名，逐图比较衣服主体，忽略背景、logo、拉链、姿势及光照；"
             "黑色衣服灰色反光仍可属于黑色，同色正反面不代表多种颜色。"
+            "一张商品原图即使包含正反两件服装，也只能按该文件返回一条images记录，不要拆成多条。"
+            "总览上的背面/正面是视角说明，不是颜色；款号、印花编号和logo也不是颜色或文件名。"
+            "filename必须逐字使用给定文件名，不能根据衣服上印刷的款号编造文件名；总览图不属于待配对原图。"
             "colors 返回 label/description；images 返回每个文件的颜色名、主体颜色、可信度、复核标记和一句理由。"
             "所有 confidence 为 0 到 1 的数字。"
             "先完成与表格颜色同名的视觉配对，浅灰/浅灰色视为同名。"
@@ -185,15 +318,112 @@ def analyze(client, style, log, force=False, cache=None):
         )
 
         def request(batch):
-            client.check_cancel()
-            log(f"{style.code}：批量识别 {len(batch)} 张原图…")
-            parts = [{"text": prompt}, chart]
-            for path in batch:
-                parts.extend(
-                    [{"text": "文件名（数据）：" + path.name}, image_part(path, 1024)]
+            filenames = [p.name for p in batch]
+            pending, matches, labels, suggestions, details = (
+                list(filenames),
+                {},
+                [],
+                [],
+                [],
+            )
+            for attempt in range(3):
+                client.check_cancel()
+                log(
+                    f"{style.code}：批量识别 {len(pending)} 张原图…"
+                    if not attempt
+                    else f"{style.code}：仅复读 {len(pending)} 张未通过校验的原图（{attempt + 1}/3）"
                 )
-            result = client.generate(parts, PAIR_SCHEMA)
-            validate_batch(result, [p.name for p in batch], style.colors)
+                correction = (
+                    ""
+                    if not attempt
+                    else (
+                        "上次返回需纠正："
+                        + "；".join(details[-5:])
+                        + "。只返回本次实际附带的原图，每个文件一条，不拆正反面、不包含总览图，不编造文件名。"
+                    )
+                )
+                parts = [
+                    {"text": prompt + " 本批准确文件名：" + repr(pending) + correction},
+                    chart,
+                ]
+                for path in batch:
+                    if path.name in pending:
+                        parts.extend(
+                            [
+                                {"text": "文件名（数据）：" + path.name},
+                                image_part(path, 1600),
+                            ]
+                        )
+                schema = copy.deepcopy(PAIR_SCHEMA)
+                schema["properties"]["images"]["items"]["properties"]["filename"][
+                    "enum"
+                ] = list(pending)
+                try:
+                    raw = client.generate(parts, schema)
+                except GeminiError:
+                    client.check_cancel()
+                    if matches:
+                        log(
+                            f"{style.code}：复读未完成，保留已可靠识别的 {len(matches)} 张原图"
+                        )
+                        break
+                    raise
+                try:
+                    new_labels, new_matches, alternatives, warnings = normalize_batch(
+                        raw, pending, style.colors
+                    )
+                except GeminiError as exc:
+                    details.append(str(exc))
+                    log(f"{style.code}：识别格式待纠正：{exc}")
+                    continue
+                for label in new_labels:
+                    if not _name(label, labels):
+                        labels.append(label)
+                for filename, row in new_matches.items():
+                    row["color_label"] = _name(row["color_label"], labels)
+                    matches[filename] = row
+                for row in alternatives:
+                    row["chart_label"] = _name(row["chart_label"], labels)
+                    suggestions.append(row)
+                details.extend(warnings)
+                for warning in warnings[:5]:
+                    log(f"{style.code}：{warning}")
+                pending = [name for name in filenames if name not in matches]
+                if not pending:
+                    break
+                details.append("缺少或冲突的文件：" + "/".join(pending))
+            client.check_cancel()
+            if not matches:
+                raise GeminiError(
+                    "本款图片复读后仍未得到有效配对：" + "；".join(details[-5:])
+                )
+            if pending:
+                log(
+                    f"{style.code}：保留 {len(matches)} 张有效识别；这些原图需手动核对："
+                    + "/".join(pending)
+                )
+            result = {
+                "colors": [
+                    {"label": label, "description": "颜色总览原文"} for label in labels
+                ],
+                "images": [
+                    matches.get(
+                        name,
+                        dict(
+                            filename=name,
+                            color_label="",
+                            main_color="",
+                            confidence=0,
+                            needs_review=True,
+                            reason="复读仍未确认，请手动配对",
+                        ),
+                    )
+                    for name in filenames
+                ],
+                "alternatives": suggestions,
+                "_unresolved_files": pending,
+            }
+            validate_batch(result, filenames, style.colors)
             return result
 
         if len(batches) == 1:
@@ -215,11 +445,17 @@ def analyze(client, style, log, force=False, cache=None):
         labels, matches, suggestions = validate_batch(
             result, [p.name for p in batch], style.colors
         )
-        temporary.chart_colors.extend(
-            label for label in labels if label not in temporary.chart_colors
-        )
+        for label in labels:
+            if not _name(label, temporary.chart_colors):
+                temporary.chart_colors.append(label)
+        for match in matches.values():
+            if match.color_label:
+                match.color_label = _name(match.color_label, temporary.chart_colors)
         temporary.matches.update(matches)
-        alternatives.extend(suggestions)
+        alternatives.extend(
+            dict(row, chart_label=_name(row["chart_label"], temporary.chart_colors))
+            for row in suggestions
+        )
     apply_suggestions(temporary)  # 同名且可信的结果先锁定；人工选择不覆盖。
     used = set(temporary.selections.values())
     for color in style.colors:
@@ -275,4 +511,5 @@ def analyze(client, style, log, force=False, cache=None):
     ):
         setattr(style, field, getattr(temporary, field))
     style.analysis_error = ""
-    cache.put(key, results)
+    if not any(result.get("_unresolved_files") for result in results):
+        cache.put(key, results)
