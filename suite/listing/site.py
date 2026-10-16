@@ -500,14 +500,14 @@ class DouyinPage:
                 raise ListingError("当前图片弹窗无法关闭，跳过本款以免误操作后续字段。")
 
     def reconcile_sizes_after_chart(self, sizes):
-        desired = {normalize_size(r["name"]): r["weight"] for r in sizes}
+        desired = {normalize_size(r["name"]): r["weight"] for r in sizes if r["weight"]}
         _, records = self.specs("尺码大小", allow_empty=True)
-        current = {
-            normalize_size(r["name"]): self.page.locator(r["note"]).input_value()
+        if any(
+            normalize_size(r["name"]) in desired
+            and self.page.locator(r["note"]).input_value()
+            != desired[normalize_size(r["name"])]
             for r in records
-        }
-        if current != desired:
-            self.log("尺码表识别改变了规格，补回 AI 尺码与体重备注")
+        ):
             self.set_sizes(sizes)
 
     def creation_state(self):
@@ -1075,6 +1075,7 @@ class DouyinPage:
             and all(
                 not r["name"].strip().isdigit() or label != "颜色分类" for r in legacy
             )
+            and not layout
         ):
             return selector, self.ordered_spec_rows(legacy)
         if layout:
@@ -1152,6 +1153,14 @@ class DouyinPage:
             try:
                 field = record.get("photo") or record["row"]
                 self.clear(field)
+                # Deleting the old thumbnail may remount the row. Bind again
+                # by the displayed colour, never reuse an old upload tile.
+                _, refreshed = self.specs("颜色分类")
+                records = [r for r in refreshed if r["name"] == color]
+                if len(records) != 1:
+                    raise ListingError("清除旧图后颜色行已变化，跳过该色")
+                record = records[0]
+                field = record.get("photo") or record["row"]
                 trigger = self.page.locator(field) if record.get("photo") else None
                 if trigger is None and not self.dom("file_inputs", selector=field):
                     photo = self.dom("spec_photo_trigger", selector=record["row"])
@@ -1164,6 +1173,7 @@ class DouyinPage:
                         )
                     )
                 self.upload(field, [path], trigger=trigger)
+                self.log(f"已按当前颜色行上传：{color} → {path.name}")
             except Cancelled:
                 raise
             except Exception as exc:
@@ -1190,65 +1200,19 @@ class DouyinPage:
                 self.page.wait_for_timeout(200)
 
     def _set_sizes(self, sizes):
-        desired = {normalize_size(row["name"]): row["weight"] for row in sizes}
-        selector, records = self.specs("尺码大小", allow_empty=True)
-        for record in records:
-            if normalize_size(record["name"]) not in desired:
-                if not record["remove"]:
-                    raise ListingError("未识别到多余尺码的删除控件。")
-                self.click_field(self.page.locator(record["remove"]))
-                self.confirm_modal(("确定", "确认", "删除"))
-        for name in desired:
-            selector, records = self.specs("尺码大小", allow_empty=True)
-            if any(normalize_size(row["name"]) == name for row in records):
-                continue
-            scope = self.page.locator(selector)
-            entry = scope.get_by_placeholder(
-                re.compile("请选择.*尺码大小|请选择尺码|输入尺码")
-            )
-            if not entry.count():
-                entry = scope.get_by_role("combobox").last
-            else:
-                entry = entry.first
-            if not entry.count():
-                entry = self.control("定位新增尺码的选择框", scope)
-                self.record_action(entry)
-            if entry.evaluate("(e)=>e.tagName") == "SELECT":
-                self.interaction_point(entry)
-                choices = entry.locator("option").evaluate_all(
-                    "(options)=>options.map(e=>({value:e.value,label:e.textContent}))"
-                )
-                matches = [
-                    option
-                    for option in choices
-                    if normalize_size(option["label"]) == name
-                ]
-                if len(matches) != 1:
-                    raise ListingError(f"未找到唯一可选尺码 {name}。")
-                entry.select_option(matches[0]["value"])
-                continue
-            self.click_field(entry)
-            if entry.evaluate("(e)=>e.tagName") == "INPUT" and entry.is_editable():
-                entry.fill(name)
-            options = self.page.get_by_role("option")
-            matches = []
-            for i in range(options.count()):
-                option = options.nth(i)
-                if option.is_visible() and normalize_size(option.inner_text()) == name:
-                    matches.append(option)
-            if len(matches) != 1:
-                option = self.control("选择尺码选项：" + name)
-                self.record_action(option)
-                self.click_field(option)
-            else:
-                self.click_field(matches[0])
-            self.page.keyboard.press("Escape")
-        _, records = self.specs("尺码大小")
-        if {normalize_size(row["name"]) for row in records} != set(desired):
-            raise ListingError("页面尺码与识别结果不一致。")
+        desired = {
+            normalize_size(row["name"]): row["weight"] for row in sizes if row["weight"]
+        }
+        _, records = self.specs("尺码大小", allow_empty=True)
+        existing = {normalize_size(row["name"]) for row in records}
+        for name in desired.keys() - existing:
+            self.log(f"跳过体重备注 {name}：网页尺码区域没有该项")
+        for name in existing - desired.keys():
+            self.log(f"保留网页尺码 {name}：图片无对应数据，不修改备注")
+        desired = {name: weight for name, weight in desired.items() if name in existing}
         for name, weight in desired.items():
             # Re-read after every write: controlled inputs may rebuild the row.
-            _, current = self.specs("尺码大小")
+            _, current = self.specs("尺码大小", allow_empty=True)
             matches = [r for r in current if normalize_size(r["name"]) == name]
             if len(matches) != 1:
                 raise ListingError(f"无法唯一定位尺码 {name} 右侧的备注框。")
@@ -1267,7 +1231,7 @@ class DouyinPage:
                 }""",
                     weight,
                 )
-            _, current = self.specs("尺码大小")
+            _, current = self.specs("尺码大小", allow_empty=True)
             matches = [r for r in current if normalize_size(r["name"]) == name]
             if (
                 len(matches) != 1
@@ -1472,10 +1436,14 @@ class DouyinPage:
         ):
             raise ListingError("已匹配颜色的规格图未确认。")
         _, sizes = self.specs("尺码大小")
-        expected = {normalize_size(s["name"]): s["weight"] for s in analysis.sizes}
-        if {normalize_size(r["name"]) for r in sizes} != set(expected):
-            raise ListingError("最终尺码校验失败。")
+        expected = {
+            normalize_size(s["name"]): s["weight"]
+            for s in analysis.sizes
+            if s["weight"]
+        }
         for row in sizes:
+            if normalize_size(row["name"]) not in expected:
+                continue
             if (
                 self.page.locator(row["note"]).input_value()
                 != expected[normalize_size(row["name"])]

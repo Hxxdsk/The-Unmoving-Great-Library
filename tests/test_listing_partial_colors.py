@@ -62,13 +62,15 @@ def test_missing_color_images_still_save_and_size_weights_match_each_row(
     ).run()
     assert results == [(product.sku, "已保存")]
     saved = next(e for e in session.audit if e["event"] == "save")
-    assert {row["name"]: row["weight"] for row in saved["sizes"]} == WEIGHTS
+    assert {row["name"]: row["weight"] for row in saved["sizes"]} == {
+        n: WEIGHTS[n] for n in ("L", "XL", "2XL")
+    }
     uploads = [e for e in session.audit if e["event"] == "specphoto"]
     assert [e["color"] for e in uploads] == (["灰色"] if photo_count else [])
     assert Journal(tmp_path).get(product)["skipped_colors"] == (
         ["黑色"] if photo_count else ["灰色", "黑色"]
     )
-    assert len(saved["price"]) == 12
+    assert len(saved["price"]) == 6
     assert set(map(int, saved["stock"])) == {1000}
 
 

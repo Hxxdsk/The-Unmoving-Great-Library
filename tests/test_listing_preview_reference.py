@@ -26,10 +26,12 @@ def test_size_entry_unblocks_real_preview_sidebar_and_adds_all_sizes(session):
             {"name": n, "weight": "100-120斤"}
             for n in ["S", "M", "L", "XL", "2XL", "3XL"]
         ]
+        page.click_field(s.page.get_by_role("combobox").last)
+        s.page.locator("#size-options").evaluate("e=>e.remove()")
         page.set_sizes(sizes)
         assert s.page.evaluate("window.closedPreview") is True
         _, records = page.specs("尺码大小")
-        assert {r["name"] for r in records} == {r["name"] for r in sizes}
+        assert {r["name"] for r in records} == {"L", "XL", "2XL"}
         assert all(
             s.page.locator(r["note"]).input_value() == "100-120斤" for r in records
         )
@@ -106,7 +108,11 @@ class BlueReferenceClient(Client):
 def blue_product(tmp_path):
     product = make_product(tmp_path)
     ref = product.path / "颜色" / "对照.png"
-    Image.new("RGB", (1000, 800), "lightblue").save(ref)
+    image = Image.new("RGB", (1000, 800), "lightblue")
+    image.paste(Image.new("RGB", (500, 800), "steelblue"), (500, 0))
+    image.save(ref)
+    for path, color in zip(product.images["颜色"], ("lightblue", "steelblue")):
+        Image.new("RGB", (100, 100), color).save(path)
     product.color_references = (ref,)
     product.color_uploads = product.images["颜色"]
     return product

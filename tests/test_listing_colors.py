@@ -39,7 +39,7 @@ def test_details_replaced_before_generation_and_main_retained(tmp_path, session)
         assert not any(e["event"] == "title" for e in audit)
 
 
-def test_initial_empty_size_list_can_be_filled(session):
+def test_initial_empty_size_list_is_left_unchanged(session):
     with session as s:
         s.check_login()
         s.page.evaluate("editor();document.querySelector('#sizes .items').innerHTML=''")
@@ -50,9 +50,8 @@ def test_initial_empty_size_list_can_be_filled(session):
                 {"name": "3XL", "weight": "160-180斤"},
             ]
         )
-        _, records = page.specs("尺码大小")
-        assert {r["name"] for r in records} == {"M", "3XL"}
-        assert s.page.locator(records[0]["note"]).input_value() == "80-100斤"
+        _, records = page.specs("尺码大小", allow_empty=True)
+        assert records == []
 
 
 def test_six_real_style_color_rows_upload_through_right_picture_boxes(

@@ -191,10 +191,10 @@ def test_full_browser_workflow_preserves_sku_replaces_details_and_only_saves_dra
     assert saves[0]["details"] == ["1.png", "2.png"]
     assert set(map(float, saves[0]["price"])) == {399}
     assert set(map(int, saves[0]["stock"])) == {1000}
-    assert [row["name"] for row in saves[0]["sizes"]] == ["L", "XL", "2XL", "M", "3XL"]
+    assert [row["name"] for row in saves[0]["sizes"]] == ["L", "XL", "2XL"]
     assert {row["name"]: row["weight"] for row in saves[0]["sizes"]}[
-        "3XL"
-    ] == "160-180斤"
+        "XL"
+    ] == "120-140斤"
     assert len([e for e in session.audit if e["event"] == "wizard"][0]["files"]) == 5
     assert any(e["event"] == "site-size-ai" for e in session.audit)
     assert not any(e["event"] == "FORBIDDEN_PUBLISH" for e in session.audit)
