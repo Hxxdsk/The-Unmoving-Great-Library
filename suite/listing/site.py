@@ -1687,6 +1687,91 @@ class DouyinPage:
         if radio.count() != 1 or not radio.is_checked():
             raise ListingError("发货时间未确认是 48 小时。")
 
+    def open_title_recommendations(self):
+        """Observe the dropdown before retrying a click that may have arrived."""
+        for attempt in range(3):
+            self.check()
+            fields = self.dom("title_recommendation")
+            if not fields:
+                raise ListingError("未找到商品标题旁的 AI 推荐按钮，未保存草稿。")
+            first = self.dom("first_recommended_title", selector=fields["input"])
+            if first:
+                return fields, first
+            token = uuid.uuid4().hex
+            self.dom("title_click_watch", token, fields["button"])
+            try:
+                try:
+                    self.click_field(self.page.locator(fields["button"]))
+                except Cancelled:
+                    raise
+                except BrowserError as exc:
+                    if is_connection_failure(exc):
+                        raise
+                    fresh = self.dom("title_recommendation")
+                    if fresh:
+                        first = self.dom(
+                            "first_recommended_title", selector=fresh["input"]
+                        )
+                        if first:
+                            self.log("标题推荐已展开，忽略点击后的等待超时")
+                            return fresh, first
+                    if self.dom("title_click_seen", token):
+                        self.log("AI 推荐点击已送达，继续等待标题，不重复点击")
+                    else:
+                        # Re-read after React remount; dispatch only after a hit
+                        # test, so animation does not require a stable rectangle.
+                        if not fresh:
+                            raise ListingError("商品标题区域正在重绘") from exc
+                        target = self.page.locator(fresh["button"])
+                        self.dom("title_click_watch", token + "-retry", fresh["button"])
+                        target.evaluate(
+                            "e=>e.scrollIntoView({block:'nearest',inline:'nearest'})"
+                        )
+                        guard = (
+                            self.dom("interaction_guard", selector=fresh["button"])
+                            or {}
+                        )
+                        if guard.get("close"):
+                            self.page.locator(guard["close"]).click(timeout=1500)
+                            continue
+                        if not guard.get("point") or not target.is_enabled():
+                            if attempt == 2:
+                                raise ListingError(
+                                    "AI 推荐按钮被其他浮层遮挡，未穿透点击"
+                                ) from exc
+                            continue
+                        self.log("AI 推荐按钮正在重绘，重新定位并触发点击")
+                        target.dispatch_event("click", timeout=1500)
+
+                def ready():
+                    current = self.dom("title_recommendation")
+                    return current and self.dom(
+                        "first_recommended_title", selector=current["input"]
+                    )
+
+                self.wait(
+                    ready, "商品标题推荐未加载出可选标题，未保存草稿。", timeout=20
+                )
+                fields = self.dom("title_recommendation")
+                first = self.dom("first_recommended_title", selector=fields["input"])
+                if first:
+                    return fields, first
+            except Cancelled:
+                raise
+            except (BrowserError, ListingError) as exc:
+                if is_connection_failure(exc) or attempt == 2:
+                    raise
+                self.log("标题推荐尚未就绪，重新读取当前页面后重试")
+            finally:
+                # A dead driver cannot clean up DOM listeners; retain its error.
+                if not self.page.is_closed():
+                    try:
+                        self.dom("title_click_cleanup", token)
+                        self.dom("title_click_cleanup", token + "-retry")
+                    except BrowserError:
+                        pass
+        raise ListingError("商品标题推荐未加载出可选标题，未保存草稿。")
+
     def select_recommended_title(self):
         self.tab("图文信息")
         # The editor can scroll inside a layout container rather than window.
@@ -1702,20 +1787,16 @@ class DouyinPage:
             fields = self.dom("title_recommendation")
         if not fields:
             raise ListingError("未找到商品标题旁的 AI 推荐按钮，未保存草稿。")
-        self.click_field(self.page.locator(fields["button"]))
-        self.wait(
-            lambda: self.dom("first_recommended_title", selector=fields["input"]),
-            "商品标题推荐未加载出可选标题，未保存草稿。",
-            timeout=20,
-        )
-        first = self.dom("first_recommended_title", selector=fields["input"])
-        previous = self.page.locator(fields["input"]).input_value().strip()
+        fields, first = self.open_title_recommendations()
+        previous = self.page.locator(fields["input"]).input_value(timeout=1500).strip()
 
         def selected():
             current = self.dom("title_recommendation")
             if not current:
                 return False
-            value = self.page.locator(current["input"]).input_value().strip()
+            value = (
+                self.page.locator(current["input"]).input_value(timeout=1500).strip()
+            )
             same_title = re.sub(r"\s+", "", first["text"]).endswith(
                 re.sub(r"\s+", "", value)
             )
@@ -1731,21 +1812,15 @@ class DouyinPage:
             fields = self.dom("title_recommendation")
             current = self.dom("first_recommended_title", selector=fields["input"])
             if not current:
-                self.click_field(self.page.locator(fields["button"]))
-                self.wait(
-                    lambda: self.dom(
-                        "first_recommended_title", selector=fields["input"]
-                    ),
-                    "商品标题推荐未加载，未保存草稿。",
-                    timeout=8,
-                )
-                current = self.dom("first_recommended_title", selector=fields["input"])
+                fields, current = self.open_title_recommendations()
             first = current
             try:
                 self.click_field(self.page.locator(first["selector"]))
             except Cancelled:
                 raise
-            except Exception:
+            except BrowserError as exc:
+                if is_connection_failure(exc):
+                    raise
                 if selected():
                     break
                 # Re-read the current first item after animation/React remount.
