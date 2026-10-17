@@ -22,7 +22,9 @@ ws.onmessage = incoming => {
   }
 };
 const chrome = {
-  runtime: {onMessage: message},
+  runtime: {onMessage: message, onStartup: hook(), onInstalled: hook()},
+  storage: {local: {async get() {return {};}, async set() {}, async setAccessLevel() {}}},
+  alarms: {onAlarm: hook(), create() {}},
   debugger: {async getTargets() { return [...tabs].map(([tabId, id]) => ({tabId, id, type: "page"})); }, onEvent: debuggerEvent, onDetach: debuggerDetach,
     async attach({tabId}) {const result = await call('Target.attachToTarget', {targetId: tabs.get(tabId), flatten: true}); roots.set(tabId, result.sessionId); rootTabs.set(result.sessionId, tabId);},
     async detach({tabId}) {const sessionId = roots.get(tabId); roots.delete(tabId); rootTabs.delete(sessionId); if (sessionId) await call('Target.detachFromTarget', {sessionId});},

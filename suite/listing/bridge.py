@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .models import ListingError
+from .pairing import EdgePairing
 
 EXTENSION_DIR = Path(__file__).with_name("edge_extension")
 
@@ -23,18 +24,26 @@ class BrowserConfig:
 
 
 class EdgeBridge:
-    def __init__(self):
-        self.token = secrets.token_hex(32)
-        self.port = None
+    def __init__(self, pairing_path=None):
+        pairing_error = None
+        try:
+            self.pairing = EdgePairing(pairing_path)
+        except (OSError, ValueError) as exc:
+            self.pairing = EdgePairing()
+            pairing_error = "无法读取原配对记录，原文件保留：" + str(exc)
+        self.token = self.pairing.data.get("token") or secrets.token_hex(32)
+        self.port = self.pairing.data.get("port")
         self.ready = threading.Event()
         self.connected = threading.Event()
         self.thread = None
         self.loop = self.stop_event = None
         self.extension = self.client = None
         self.client_epoch = None
-        self.failure = None
+        self.failure = pairing_error
 
     def start(self):
+        if self.failure:
+            raise ListingError(f"无法启动 Edge 连接：{self.failure}")
         if self.thread is None:
             self.thread = threading.Thread(target=self._run, daemon=True)
             self.thread.start()
@@ -56,7 +65,8 @@ class EdgeBridge:
 
     def _run(self):
         try:
-            asyncio.run(self._serve())
+            with self.pairing.lock():
+                asyncio.run(self._serve())
         except Exception as exc:
             self.failure = str(exc)
             self.ready.set()
@@ -73,7 +83,7 @@ main{{background:white;border:1px solid #e6dcf5;border-radius:20px;padding:36px}
 <p id="status">首次使用请加载连接扩展；已加载时会自动连接。</p>
 <ol><li>打开 <b>edge://extensions</b>，开启“开发人员模式”。</li>
 <li>点击“加载解压缩的扩展”，选择下方目录。</li>
-<li>回到工具箱，重新点击“连接 Edge”；在新建的抖店页确认已登录，然后开始任务。</li></ol>
+<li>首次配对后返回工具箱；以后重启浏览器或工具箱会自动重连，无须再次配对。</li></ol>
 <p><code>{path}</code></p><p>使用当前 Edge 登录状态；普通标签页可以继续使用。请勿手动操作工具的抖店工作页。Edge 会显示扩展调试提示，任务期间请保留。</p></main></html>"""
 
     async def _request(self, connection, request):
@@ -114,6 +124,7 @@ main{{background:white;border:1px solid #e6dcf5;border-radius:20px;padding:36px}
             if self.extension:
                 await socket.close(1008, "已有 Edge 连接，请关闭旧连接后重试")
                 return
+            self.pairing.mark_connected(socket.request.headers.get("Origin", ""))
             self.extension = socket
             self.connected.set()
             try:
@@ -136,11 +147,20 @@ main{{background:white;border:1px solid #e6dcf5;border-radius:20px;padding:36px}
                 self.connected.clear()
                 if self.client:
                     await self.client.close(
-                        1011, "Edge 连接已断开，请重新连接后核对当前货号"
+                        1011, "Edge 暂时离线，扩展会自动重连；请核对当前货号"
                     )
         else:
             if self.client or not self.extension:
-                await socket.close(1008, "请先点击连接 Edge，并加载连接扩展")
+                reason = (
+                    "已有任务正在使用 Edge 工作页，请等待当前任务结束"
+                    if self.client
+                    else (
+                        "配对已记住，正在等待 Edge 扩展自动上线，无需重新连接"
+                        if self.pairing.data.get("paired")
+                        else "请先点击连接 Edge，并加载连接扩展"
+                    )
+                )
+                await socket.close(1008, reason)
                 return
             self.client = socket
             self.client_epoch = secrets.token_hex(16)
@@ -170,15 +190,18 @@ main{{background:white;border:1px solid #e6dcf5;border-radius:20px;padding:36px}
         async with serve(
             self._handle,
             "127.0.0.1",
-            0,
+            self.port or 0,
             process_request=self._request,
             ping_interval=None,
             max_size=16 * 1024 * 1024,
         ) as server:
             self.port = server.sockets[0].getsockname()[1]
+            self.pairing.save(token=self.token, port=self.port)
             self.ready.set()
             await self.stop_event.wait()
 
     def close(self):
         if self.loop and self.stop_event and self.loop.is_running():
             self.loop.call_soon_threadsafe(self.stop_event.set)
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=3)

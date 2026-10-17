@@ -79,7 +79,6 @@ class ListingWindow(QMainWindow):
         self.worker = None
         self.check_job = None
         self.guide = None
-        self.bridge = EdgeBridge()
         self.config_path = (
             Path(
                 QStandardPaths.writableLocation(
@@ -87,6 +86,9 @@ class ListingWindow(QMainWindow):
                 )
             )
             / "listing-settings.json"
+        )
+        self.bridge = EdgeBridge(
+            self.config_path.with_name("listing-edge-pairing.json")
         )
         try:
             self.preferences = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -130,7 +132,8 @@ class ListingWindow(QMainWindow):
         self.login.clicked.connect(self.check_login)
         self.install_extension = QPushButton("首次安装扩展")
         self.install_extension.clicked.connect(self.open_extension)
-        self.connection_status = label("尚未连接 Edge", "hint")
+        self.connection_status = label("正在恢复 Edge 配对…", "hint")
+        self.connection_status.setWordWrap(True)
         browser_row = QHBoxLayout()
         browser_row.addWidget(self.login)
         browser_row.addWidget(self.install_extension)
@@ -259,15 +262,34 @@ class ListingWindow(QMainWindow):
         outer.addLayout(actions)
         self.start.setEnabled(False)
         self.connection_timer = QTimer(self)
-        self.connection_timer.timeout.connect(
-            lambda: self.connection_status.setText(
-                "扩展通道已连接" if self.bridge.connected.is_set() else "尚未连接 Edge"
-            )
-        )
-        self.connection_timer.start(1000)
+        self.connection_timer.timeout.connect(self.update_connection_status)
+        self.connection_timer.start(3000)
+        QTimer.singleShot(0, self.restore_connection)
         self.workflow_profile.currentTextChanged.connect(
             lambda _: self.save_preferences()
         )
+
+    def restore_connection(self):
+        if self.closing:
+            return
+        try:
+            self.bridge.start()
+            self.update_connection_status()
+        except Exception as exc:
+            self.log.appendPlainText("自动连接暂未启动：" + str(exc))
+
+    def update_connection_status(self):
+        if self.bridge.connected.is_set():
+            text = "Edge 已自动连接 · 配对已记住"
+        elif self.bridge.failure:
+            text = "自动连接服务暂不可用：" + self.bridge.failure
+        elif self.bridge.pairing.removed():
+            text = "已检测到连接扩展被删除，请重新安装并连接"
+        elif self.bridge.pairing.data.get("paired"):
+            text = "配对已记住 · 等待 Edge 扩展自动上线"
+        else:
+            text = "首次使用请连接 Edge，此后自动连接"
+        self.connection_status.setText(text)
 
     def save_preferences(self):
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -337,10 +359,16 @@ class ListingWindow(QMainWindow):
             self.scan_root()
 
     def browser_config(self):
+        if self.bridge.failure:
+            raise RuntimeError("自动连接服务暂不可用：" + self.bridge.failure)
         if not self.bridge.connected.is_set():
-            raise RuntimeError(
-                "请先点击“连接 Edge”；首次使用只需加载一次连接扩展，无需关闭 Edge。"
-            )
+            if self.bridge.pairing.removed():
+                message = "已检测到连接扩展被删除，请重新安装扩展并连接。"
+            elif self.bridge.pairing.data.get("paired"):
+                message = "配对已记住，正在等待扩展自动上线；请打开原 Edge 用户配置并启用扩展，无需再次连接。"
+            else:
+                message = "首次使用请点击连接 Edge 并安装扩展；配对一次后会自动记住。"
+            raise RuntimeError(message)
         return self.bridge.start()
 
     def scan_root(self):
@@ -539,14 +567,17 @@ class ListingWindow(QMainWindow):
             return
         try:
             config = self.bridge.start()
-            if not self.bridge.connected.is_set():
+            if not self.bridge.connected.is_set() and (
+                not self.bridge.pairing.data.get("paired")
+                or self.bridge.pairing.removed()
+            ):
                 self.bridge.open_edge()
             self.save_preferences()
         except Exception as exc:
             self.error(str(exc))
             return
         self.log.appendPlainText(
-            "已在当前 Edge 打开连接页；首次使用请加载扩展，已安装时自动连接。"
+            "首次配对请完成连接页操作；已配对时自动等待 Edge 上线，无需重复连接。"
         )
 
         def run(cancel, *_):
@@ -558,7 +589,7 @@ class ListingWindow(QMainWindow):
                     return "已取消连接，Edge 窗口保留。"
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
-                        "尚未收到 Edge 扩展连接。请按连接页说明首次加载扩展，再点“连接 Edge”。"
+                        "Edge 扩展暂未上线，配对记录保留，后台会继续自动等待。请确认已打开原 Edge 用户配置，扩展已启用。首次使用请按连接页说明安装扩展。"
                     )
             with EdgeSession(config, cancel) as session:
                 return session.open_login()

@@ -225,12 +225,71 @@ chrome.windows.onFocusChanged.addListener(windowId => {
     }
   })().catch(error => console.warn('工作窗口查看状态未调整：', error.message));
 });
+// Remember the capability locally; retries never create tabs or steal focus.
+let connecting = null, reconnectTimer = null;
+const PAIR_KEY = 'greatLibraryPairing';
+function validPair(pair) {
+  return pair && Number.isInteger(pair.port) && pair.port > 0 && pair.port < 65536 && /^[a-f0-9]{64}$/.test(pair.token);
+}
+function retryConnection() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => reconnectSaved().catch(() => {}), 3000);
+}
+async function connectPair(pair) {
+  if (!validPair(pair)) throw new Error('配对记录无效，请首次连接 Edge');
+  const address = `ws://127.0.0.1:${pair.port}/extension/${pair.token}`;
+  if (socket?.readyState === WebSocket.OPEN && socket.url === address) return;
+  if (connecting) return connecting;
+  connecting = (async () => {
+    clearTimeout(reconnectTimer);
+    if (socket) { clearInterval(heartbeat); socket.onclose = null; socket.close(); await disconnect(); }
+    const current = new WebSocket(address);
+    socket = current;
+    const closed = () => {
+      if (socket !== current) return;
+      clearInterval(heartbeat); socket = null; epoch = null;
+      detaching = disconnect();
+      retryConnection();
+    };
+    current.onclose = closed;
+    try {
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {current.close();reject(new Error('等待本机工具箱上线'));}, 5000);
+        current.onopen = () => {clearTimeout(timeout);resolve();};
+        current.onerror = () => {clearTimeout(timeout);reject(new Error('等待本机工具箱上线'));};
+        current.onclose = () => {clearTimeout(timeout);closed();reject(new Error('本机连接暂时离线'));};
+      });
+      current.onclose = closed;
+      current.onmessage = async incoming => {
+        const value = JSON.parse(incoming.data);
+        if (value.type === 'detach') { epoch = null; detaching = disconnect(); await detaching; return; }
+        await detaching;
+        epoch = value.relayEpoch;
+        try { send({id: value.id, result: await command(value), relayEpoch: value.relayEpoch, ...(value.sessionId ? {sessionId: value.sessionId} : {})}); }
+        catch (error) { send({id: value.id, error: {code: -32000, message: error.message}, relayEpoch: value.relayEpoch, ...(value.sessionId ? {sessionId: value.sessionId} : {})}); }
+      };
+      heartbeat = setInterval(() => send({type: 'heartbeat'}), 20000);
+    } catch (error) {
+      current.close();
+      closed();
+      throw error;
+    }
+  })();
+  try { await connecting; } finally { connecting = null; }
+}
+async function reconnectSaved() {
+  const data = await chrome.storage.local.get(PAIR_KEY);
+  const pair = data[PAIR_KEY];
+  if (!validPair(pair)) return;
+  if (pair.bounds) workBounds = pair.bounds;
+  await connectPair(pair);
+}
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type !== 'connect') return;
   (async () => {
     const url = new URL(sender.url);
     if (sender.tab?.incognito || url.hostname !== '127.0.0.1' || url.pathname !== '/greatlibrary/connect' ||
-        url.protocol !== 'http:' || Number(url.port) !== message.port || !/^[a-f0-9]{64}$/.test(message.token) ||
+        url.protocol !== 'http:' || Number(url.port) !== message.port || !validPair(message) ||
         url.hash.slice(1) !== message.token) throw new Error('连接来源无效，请从工具箱点击连接 Edge');
     try {
       const outer = await chrome.windows.get(sender.tab.windowId);
@@ -239,20 +298,18 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (Number.isFinite(outer.left)) workBounds.left = outer.left;
       if (Number.isFinite(outer.top)) workBounds.top = outer.top;
     } catch (_) { /* Use browser defaults if source window metadata is unavailable. */ }
-    if (socket) { clearInterval(heartbeat); socket.onclose = null; socket.close(); await disconnect(); }
-    socket = new WebSocket(`ws://127.0.0.1:${message.port}/extension/${message.token}`);
-    await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = () => reject(new Error('工具箱未运行，请重新点击连接 Edge')); });
-    socket.onmessage = async incoming => {
-      const value = JSON.parse(incoming.data);
-      if (value.type === 'detach') { epoch = null; detaching = disconnect(); await detaching; return; }
-      await detaching;
-      epoch = value.relayEpoch;
-      try { send({id: value.id, result: await command(value), relayEpoch: value.relayEpoch, ...(value.sessionId ? {sessionId: value.sessionId} : {})}); }
-      catch (error) { send({id: value.id, error: {code: -32000, message: error.message}, relayEpoch: value.relayEpoch, ...(value.sessionId ? {sessionId: value.sessionId} : {})}); }
-    };
-    socket.onclose = () => { clearInterval(heartbeat); disconnect(); socket = null; };
-    heartbeat = setInterval(() => send({type: 'heartbeat'}), 20000);
+    const pair = {port: message.port, token: message.token, bounds: workBounds};
+    await chrome.storage.local.set({[PAIR_KEY]: pair});
+    await connectPair(pair);
     respond({ok: true});
   })().catch(error => respond({error: error.message}));
   return true;
 });
+chrome.runtime.onStartup.addListener(() => reconnectSaved().catch(() => {}));
+chrome.runtime.onInstalled.addListener(() => reconnectSaved().catch(() => {}));
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === 'greatlibrary-reconnect') reconnectSaved().catch(() => {});
+});
+chrome.alarms.create('greatlibrary-reconnect', {periodInMinutes: .5});
+chrome.storage.local.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'}).catch(() => {});
+reconnectSaved().catch(() => {});

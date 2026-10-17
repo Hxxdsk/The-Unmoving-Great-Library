@@ -4,7 +4,9 @@ const hook = () => ({listeners: [], addListener(fn) {this.listeners.push(fn);}})
 const tabs = new Map(), calls = [], commands = [];
 let seq = 0, userFocused = false, windowState = "minimized";
 const chrome = {
-  runtime: {onMessage: hook()},
+  runtime: {onMessage: hook(), onStartup: hook(), onInstalled: hook()},
+  storage: {local: {async get() {return {};}, async set() {}, async setAccessLevel() {}}},
+  alarms: {onAlarm: hook(), create() {}},
   debugger: {
     onEvent: hook(), onDetach: hook(),
     async getTargets() {return [...tabs.values()].map(t => ({tabId:t.id,type:'page',id:'target-'+t.id}));},
