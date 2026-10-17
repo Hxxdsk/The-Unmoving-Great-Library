@@ -279,9 +279,9 @@ def analyze(client, style, log, force=False, cache=None):
             "；".join(style.issues + style.ai_issues)
             or "AI 需要颜色图；可直接手动配对。"
         )
-    cache = cache or ResultCache("color-v3")
+    cache = cache or ResultCache("color-v4")
     key = cache.key(
-        {"version": 3, "model": client.model, "table_colors": list(style.colors)},
+        {"version": 4, "model": client.model, "table_colors": list(style.colors)},
         [style.chart, *style.images],
     )
     batches = [
@@ -305,6 +305,11 @@ def analyze(client, style, log, force=False, cache=None):
             "第一张是颜色总览，其后是商品原图，各有准确文件名。每个颜色只有一张原图，不可重复使用。"
             "读取总览印刷颜色名，逐图比较衣服主体，忽略背景、logo、拉链、姿势及光照；"
             "黑色衣服灰色反光仍可属于黑色，同色正反面不代表多种颜色。"
+            "先分清每件衣服轮廓与遮挡关系，再在目标服装的领口、胸腹、袖片或裤腿等至少两处未遮挡的大块面料核对颜色；"
+            "不要把内搭、叠放的另一件衣服、模特皮肤、阴影或局部印花当作主体色，也不要按整张图的平均色或面积最大背景判断。"
+            "总览中服装重叠时按每件完整轮廓及其邻近印刷颜色文字建立对应，不把前方服装的颜色分给后方被挡服装。"
+            "商品图有多件不同色衣服且无法唯一确定目标、遮挡后不足两处面料可辨，必须needs_review=true并降低confidence，不能硬猜。"
+            "reason写明用于比对的两处主体区域、排除了哪件叠放服装，以及对应总览文字依据。"
             "一张商品原图即使包含正反两件服装，也只能按该文件返回一条images记录，不要拆成多条。"
             "总览上的背面/正面是视角说明，不是颜色；款号、印花编号和logo也不是颜色或文件名。"
             "filename必须逐字使用给定文件名，不能根据衣服上印刷的款号编造文件名；总览图不属于待配对原图。"
@@ -331,7 +336,7 @@ def analyze(client, style, log, force=False, cache=None):
                 log(
                     f"{style.code}：批量识别 {len(pending)} 张原图…"
                     if not attempt
-                    else f"{style.code}：仅复读 {len(pending)} 张未通过校验的原图（{attempt + 1}/3）"
+                    else f"{style.code}：仅复读 {len(pending)} 张待复核的原图（{attempt + 1}/3）"
                 )
                 correction = (
                     ""
@@ -388,10 +393,20 @@ def analyze(client, style, log, force=False, cache=None):
                 details.extend(warnings)
                 for warning in warnings[:5]:
                     log(f"{style.code}：{warning}")
-                pending = [name for name in filenames if name not in matches]
+                pending = [
+                    name
+                    for name in filenames
+                    if name not in matches
+                    or matches[name]["needs_review"]
+                    or matches[name]["confidence"] < 0.88
+                ]
+                if pending and any(name in matches for name in pending):
+                    details.append(
+                        "遮挡或相近色需复核：只看目标衣服未遮挡的两处面料，不按叠放衣服或背景的平均颜色判断"
+                    )
                 if not pending:
                     break
-                details.append("缺少或冲突的文件：" + "/".join(pending))
+                details.append("缺少、冲突或需复核的文件：" + "/".join(pending))
             client.check_cancel()
             if not matches:
                 raise GeminiError(

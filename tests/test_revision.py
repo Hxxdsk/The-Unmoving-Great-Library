@@ -113,7 +113,7 @@ def test_log_follows_latest_and_can_pause(app):
     log.close()
 
 
-def test_black_candidate_is_marked_for_review_in_one_request(tmp_path):
+def test_black_candidate_stays_marked_for_review_after_bounded_rechecks(tmp_path):
     chart, image = tmp_path / "颜色.png", tmp_path / "2.jpg"
     Image.new("RGB", (40, 40), "white").save(chart)
     Image.new("RGB", (40, 40), "black").save(image)
@@ -124,7 +124,7 @@ def test_black_candidate_is_marked_for_review_in_one_request(tmp_path):
     client = GeminiClient("test-key", "models/gemini-test")
     with patch.object(client, "generate", return_value=reply) as generate:
         client.analyze_style(style, force=True)
-    assert generate.call_count == 1
+    assert generate.call_count == 3
     assert style.selections == {"黑色": "2.jpg"}
     assert "待核对" in style.review_notes["黑色"]
     assert "黑色" in style.suggested_colors

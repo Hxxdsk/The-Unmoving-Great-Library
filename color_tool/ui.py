@@ -19,6 +19,7 @@ from suite.widgets import ClickOnlyComboBox, FollowLog, readable_selection
 from .gemini import GeminiError
 from suite.shared_ai import shared_client
 from .settings import Settings
+from .previews import FitImage, ImageChoiceCombo
 
 STYLESHEET = """
 QMainWindow, QDialog { background: #f5f2fa; }
@@ -248,7 +249,7 @@ class Window(QMainWindow):
         self.table.cellDoubleClicked.connect(self.preview_row)
         right.addWidget(self.table, 1)
         gallery_row = QHBoxLayout()
-        gallery_row.addWidget(label("双击行查看原图；名称不同的颜色由你连接。", "hint"))
+        gallery_row.addWidget(label("下拉列表悬停看预览；双击行查看全图。", "hint"))
         gallery_row.addStretch()
         self.gallery_toggle = QPushButton("展开原图 ▾")
         self.gallery_toggle.setCheckable(True)
@@ -486,7 +487,7 @@ class Window(QMainWindow):
             count = QTableWidgetItem(str(len(skus)))
             count.setToolTip("\n".join(skus))
             self.table.setItem(row, 1, count)
-            combo = ClickOnlyComboBox()
+            combo = ImageChoiceCombo(style.folder)
             readable_selection(combo.view())
             combo.setMaxVisibleItems(12)
             combo.addItem("请选择对应图片…", "")
@@ -682,18 +683,11 @@ class Window(QMainWindow):
     def show_image(self, path: Path):
         dialog = QDialog(self)
         dialog.setWindowTitle(path.name)
-        dialog.resize(840, 780)
+        available = self.screen().availableGeometry()
+        dialog.resize(min(900, int(available.width() * .85)), min(820, int(available.height() * .85)))
         layout = QVBoxLayout(dialog)
-        scroll = QScrollArea()
-        image = QLabel()
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            image.setText("无法预览此图片；请检查文件内容或格式。")
-        else:
-            image.setPixmap(pixmap.scaled(1100, 1700, Qt.AspectRatioMode.KeepAspectRatio,
-                                          Qt.TransformationMode.SmoothTransformation))
-        scroll.setWidget(image)
-        layout.addWidget(scroll)
+        image = FitImage(path)
+        layout.addWidget(image, 1)
         layout.addWidget(label(str(path), "hint"))
         dialog.exec()
 

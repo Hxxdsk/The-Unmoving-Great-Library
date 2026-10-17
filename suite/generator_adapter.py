@@ -60,7 +60,7 @@ def apply(module):
             self.main_canvas.itemcget(self._main_window, "window")
         )
         file_card = outer.winfo_children()[0]
-        self.ai_panel = GeminiPanel(outer, "AI 面料 / 图片补全", component="generator")
+        self.ai_panel = GeminiPanel(outer, "AI 面料 / 图片补全 / 上下装判断", component="generator")
         self.ai_panel.pack(fill="x", after=file_card, pady=(10, 0))
         self.task = TkTask(self.root)
         self.cancel_button = ttk.Button(
@@ -78,7 +78,7 @@ def apply(module):
             )
             if path:
                 create_input_template(path)
-                self.log("输入模板已保存；图片列可选，支持插入图片或本地图片路径。")
+                self.log("输入模板已保存；上下装自动判断，无须填写。图片列可选，支持插入图片或本地图片路径；加绒标准价另加20。")
 
         ttk.Button(self.ai_panel, text="输入模板", command=template).grid(
             row=1, column=0, sticky="w"

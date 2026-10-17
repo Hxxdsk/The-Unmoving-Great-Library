@@ -543,7 +543,8 @@ def test_template_includes_optional_image_column(tmp_path):
     path = tmp_path / "template.xlsx"
     create_input_template(path)
     book = load_workbook(path)
-    assert book.active["H1"].value == "图片"
+    assert book.active["G1"].value == "图片"
+    assert "上下装" not in [cell.value for cell in book.active[1]]
     book.close()
 
 
