@@ -130,10 +130,11 @@ def apply(module):
     page_header = cls._page_header
 
     def header(self, step, title, description):
+        self._guide_step = step
         methods = {
-            "步骤 1 / 3": "选择聚水潭和抖店表格 → 下一步",
-            "步骤 2 / 3": "先点左侧款号，再选右侧 PID → 下一步",
-            "步骤 3 / 3": "连接颜色 → 导出；未配对颜色跳过",
+            "步骤 1 / 3": "把两本表摆好，我来陪你认款。",
+            "步骤 2 / 3": "先认款再认颜色，别着急翻页哦。",
+            "步骤 3 / 3": "给同色夹上书签，核对好再装订。",
         }
         page_header(self, step, title, methods.get(step, "连接颜色 → 导出"))
 

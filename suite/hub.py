@@ -36,6 +36,8 @@ class Hub(QMainWindow):
         self.logs = logs or (base / "GreatLibraryToolbox" / "logs")
         self.logs.mkdir(parents=True, exist_ok=True)
         self._build()
+        from .guide_qt import install_qt_guide
+        install_qt_guide(self, "hub", lambda _: self.configure_ai())
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_children)
         self.timer.start(750)
@@ -58,7 +60,7 @@ class Hub(QMainWindow):
         row.setContentsMargins(25, 20, 25, 20)
         titles = QVBoxLayout()
         titles.addWidget(label("大图书馆 · 商品资料工具箱", "suiteTitle"))
-        titles.addWidget(label("选择工具 → 处理资料 → 输出", "suiteSubtitle"))
+        titles.addWidget(label("帕秋莉的小工房，今天一起整理哪一摞？", "suiteSubtitle"))
         row.addLayout(titles)
         row.addStretch()
         row.addWidget(mascot(78))
@@ -92,7 +94,9 @@ class Hub(QMainWindow):
             layout.addLayout(heading)
             layout.addWidget(label(tool.title, "toolTitle"))
             methods = {"color": "读取表格 → 配对颜色 → 输出图片", "matcher": "导入表格 → 关联 PID → 配色导出", "generator": "选择资料与主数据 → 生成 → 核对", "joiner": "加载图片 → 确认正反面 → 拼接", "listing": "选择目录 → 自动填写 → 保存草稿"}
-            layout.addWidget(label(methods.get(tool.key, tool.subtitle), "hint"))
+            intro = label(tool.description, "hint")
+            intro.setWordWrap(True)
+            layout.addWidget(intro)
             layout.addStretch()
             button = QPushButton("打开工具  →")
             button.setObjectName("primary")
@@ -228,6 +232,9 @@ class Hub(QMainWindow):
     def refresh_ai(self):
         data = self.ai_manager.snapshot()
         count = sum(data["model"] in entry["models"] for entry in data["entries"])
+        self._guide_ai_ready = bool(data["model"] and count)
+        if hasattr(self, "patchouli_guide"):
+            self.patchouli_guide.refresh()
         self.ai_status.setText(
             f"{data['model'].removeprefix('models/')} · {count} 条 API 轮询"
             if count

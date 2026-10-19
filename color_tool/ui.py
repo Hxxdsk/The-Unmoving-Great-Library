@@ -125,6 +125,8 @@ class Window(QMainWindow):
         saved = self.settings.get("directory")
         if saved and Path(saved).is_dir():
             self.set_directory(Path(saved))
+        from suite.guide_qt import install_qt_guide
+        install_qt_guide(self, "color")
 
     def _build(self):
         central = QWidget()
@@ -138,13 +140,12 @@ class Window(QMainWindow):
         title_row.setContentsMargins(16, 8, 16, 8)
         titles = QVBoxLayout()
         titles.addWidget(label("商品图片 · 颜色配对助手", "title"))
-        titles.addWidget(label("读取表格  →  AI 或手动配对  →  核对并输出", "subtitle"))
         title_row.addLayout(titles)
         title_row.addStretch()
         mascot = label("")
         mascot.setPixmap(thumbnail(Path(__file__).resolve().parent.parent / "assets" / "logo-color.png", 52, 52))
         mascot.setToolTip("帕秋莉的魔法书 · 图片与资料整理")
-        title_row.addWidget(mascot)
+        mascot.hide()
         self.setup_toggle = QPushButton("收起设置 ▴")
         self.setup_toggle.setCheckable(True)
         self.setup_toggle.toggled.connect(self.toggle_setup)
@@ -177,15 +178,12 @@ class Window(QMainWindow):
         self.ai_enabled = QCheckBox("启用 AI")
         self.ai_enabled.setChecked(True)
         self.ai_enabled.toggled.connect(self.update_totals)
-        grid.addWidget(self.ai_enabled, 1, 0)
-        grid.addWidget(label("API / 模型在工具箱首页统一设置", "hint"), 1, 1, 1, 4)
+        self.ai_enabled.setStyleSheet("QCheckBox { color: #e6ddef; }")
+        self.ai_enabled.setToolTip("AI 在首页配置；也可以关闭 AI 手动配对。")
+        title_row.insertWidget(title_row.count()-1, self.ai_enabled)
         grid.setColumnStretch(1, 3)
         grid.setColumnStretch(3, 2)
         setup.addLayout(grid)
-        privacy_row = QHBoxLayout()
-        privacy_row.addWidget(label("无 Key 也可手动配对后输出。", "hint"))
-        privacy_row.addStretch()
-        setup.addLayout(privacy_row)
         outer.addWidget(setup_card)
 
         stats = QHBoxLayout()
@@ -226,7 +224,8 @@ class Window(QMainWindow):
         top = QHBoxLayout()
         description = QVBoxLayout()
         self.style_heading = label("颜色配对工作台", "section")
-        self.style_hint = label("点击列表选择图片；双击行放大。", "hint")
+        self.style_hint = label("", "hint")
+        self.style_hint.hide()
         self.style_hint.setWordWrap(True)
         description.addWidget(self.style_heading)
         description.addWidget(self.style_hint)
@@ -319,7 +318,7 @@ class Window(QMainWindow):
         follow.toggled.connect(lambda enabled: setattr(self.log, "follow_latest", enabled))
         self.log.textChanged.connect(self.update_latest_log)
         outer.addWidget(self.log)
-        self.busy_widgets = [setup_card, splitter, self.analyze_button, self.retry_button,
+        self.busy_widgets = [setup_card, self.ai_enabled, splitter, self.analyze_button, self.retry_button,
                              self.export_button, self.open_button, self.partial_output]
 
     def save_setting(self, key, value):
@@ -479,6 +478,7 @@ class Window(QMainWindow):
         self.style_heading.setText(f"{style.code}  ·  {len(style.colors)} 个颜色")
         self.style_hint.setText("；".join(style.issues + style.ai_issues) or ("AI 失败，可手动配对。" if style.analysis_error
                                                          else "核对建议；名称不一致的行请重点检查。"))
+        self.style_hint.setVisible(bool(style.issues or style.ai_issues or style.analysis_error))
         self.style_summary.setText(f"{len(style.images)} 张原图 · {style.sku_count} 张输出")
         self.table.setRowCount(len(style.colors))
         for row, (color, skus) in enumerate(style.colors.items()):

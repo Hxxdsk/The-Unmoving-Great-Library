@@ -94,22 +94,25 @@ def apply_palette(module, key):
 
 
 def decorate_header(root, key):
-    """只在标题栏放置装饰，不接管原有输入区或业务回调。"""
+    """Only replace the old subtitle; the interactive mascot owns its own shelf."""
     import tkinter as tk
-    from PIL import Image, ImageTk
+    def replace_subtitle(widget):
+        for child in widget.winfo_children():
+            if isinstance(child, tk.Label):
+                text = str(child.cget("text"))
+                if len(text) > 14 and not child.cget("image"):
+                    child.configure(text=get_tool(key).description)
+                    return True
+            elif replace_subtitle(child):
+                return True
+        return False
     for header in root.winfo_children():
         try:
-            if str(header.cget("bg")).lower() != p.HEADER.lower():
-                continue
+            if str(header.cget("bg")).lower() == p.HEADER.lower():
+                replace_subtitle(header)
+                break
         except tk.TclError:
             continue
-        with Image.open(ROOT / "assets" / ("logo-" + key + ".png")) as artwork:
-            artwork.thumbnail((56, 56), Image.Resampling.LANCZOS)
-            icon = ImageTk.PhotoImage(artwork)
-        decoration = tk.Label(header, image=icon, bg=p.HEADER, borderwidth=0)
-        decoration.image = icon
-        decoration.place(relx=1, x=-150 if key == "generator" else -24, y=8, anchor="ne")
-        break
 
 
 def run_legacy(key: str):
@@ -140,5 +143,7 @@ def run_legacy(key: str):
                 recolor(child)
         recolor(root)
     decorate_header(root, key)
+    from .guide_tk import install_tk_guide
+    install_tk_guide(app, key)
     root.mainloop()
     return app

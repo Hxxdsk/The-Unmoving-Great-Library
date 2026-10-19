@@ -9,7 +9,7 @@ def register_extensions(register):
             "listing",
             "抖店批量上架",
             "逐货号填写 · 保存草稿",
-            "复用 Edge 登录状态，上传图片、匹配颜色尺码并逐款保存抖店草稿。",
+            "你收好素材和标题，我陪每一款走到草稿箱。",
             entrypoint="suite.listing.ui:main",
             dependencies=(
                 Dependency("playwright.sync_api", "playwright"),

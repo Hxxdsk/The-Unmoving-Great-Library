@@ -106,7 +106,7 @@ class ListingWindow(QMainWindow):
         heading = QHBoxLayout()
         title = QVBoxLayout()
         title.addWidget(label("抖店批量上架", "title"))
-        title.addWidget(label("选择目录 → 连接 Edge → 逐货号填写 → 保存草稿", "hint"))
+        title.addWidget(label("帕秋莉会在底边陪你，把每一款稳稳收进草稿箱。", "hint"))
         heading.addLayout(title)
         heading.addStretch()
         heading.addWidget(mascot(70, "listing"))
@@ -236,6 +236,8 @@ class ListingWindow(QMainWindow):
         actions.addWidget(self.start)
         outer.addLayout(actions)
         self.start.setEnabled(False)
+        from suite.guide_qt import install_qt_guide
+        install_qt_guide(self, "listing", lambda _: self.check_login())
         self.connection_timer = QTimer(self)
         self.connection_timer.timeout.connect(self.update_connection_status)
         self.connection_timer.start(3000)
@@ -485,6 +487,7 @@ class ListingWindow(QMainWindow):
         self.worker.start()
 
     def update_row(self, sku, status, message, percent):
+        self._guide_phase = str(message)
         for row, product in enumerate(self.products):
             if product.sku == sku:
                 for column, value in ((7, status), (8, f"{percent}%"), (9, message)):
