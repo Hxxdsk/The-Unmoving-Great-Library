@@ -160,3 +160,35 @@ def test_animated_recommend_button_uses_fresh_guarded_click(session):
             == "网站推荐的第一个完整商品标题"
         )
         assert any("AI 推荐按钮正在重绘" in text for text in messages)
+
+
+def test_title_applied_is_confirmed_even_when_recommendation_popup_remains(session):
+    with session as s:
+        s.check_login()
+        s.page.evaluate("""editor();titleRecommendations=()=>{
+          const popup=document.createElement('div');popup.className='title-popover';
+          popup.innerHTML='<div id="recommended-first">Dickies 男士美式复古宽松阔腿休闲裤加绒加厚</div><button>AI 重新生成</button>';
+          popup.firstChild.onclick=()=>{document.querySelector('#final-title').value='男士美式复古宽松阔腿休闲裤加绒加厚'};
+          document.querySelector('#editor-title').append(popup);
+        }""")
+        page = DouyinPage(s, threading.Event())
+        page.select_recommended_title()
+        assert (
+            s.page.locator("#final-title").input_value()
+            == "男士美式复古宽松阔腿休闲裤加绒加厚"
+        )
+        assert s.page.locator("#recommended-first").is_visible()
+
+
+def test_changed_input_with_wrong_title_is_not_accepted(session):
+    with session as s:
+        s.check_login()
+        s.page.evaluate("""editor();titleRecommendations=()=>{
+          const popup=document.createElement('div');popup.className='title-popover';
+          popup.innerHTML='<div>网站推荐的第一个完整商品标题</div><button>AI 重新生成</button>';
+          popup.firstChild.onclick=()=>{document.querySelector('#final-title').value='错误的另一个标题';popup.remove()};
+          document.querySelector('#editor-title').append(popup);
+        }""")
+        page = DouyinPage(s, threading.Event())
+        with pytest.raises(ListingError, match="推荐标题尚未应用"):
+            page.select_recommended_title()

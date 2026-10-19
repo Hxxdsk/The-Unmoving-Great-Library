@@ -165,6 +165,7 @@ class BatchRunner:
                                 except Exception as exc:
                                     if is_connection_failure(exc):
                                         raise
+                                    page.discard_pending(str(exc))
                                     page.log(f"跳过图片字段 {'/'.join(names)}：{exc}")
                                     page.dismiss_optional_dialogs()
                             advance("水洗标与货号", 40)
@@ -179,6 +180,7 @@ class BatchRunner:
                             except Exception as exc:
                                 if is_connection_failure(exc):
                                     raise
+                                page.discard_pending(str(exc))
                                 page.log(f"跳过水洗标图片：{exc}")
                                 page.dismiss_optional_dialogs()
                             sku_control = page.fill_sku(product.sku)
@@ -224,6 +226,7 @@ class BatchRunner:
                             )
                             self.report(product.sku, "处理中", "保存草稿", 97)
                             url = page.save_draft()
+                            page.confirm_memory()
                             journal.update(
                                 product,
                                 status="saved",
@@ -240,6 +243,7 @@ class BatchRunner:
                             self.report(product.sku, "已保存", message, 100)
                             results.append((product.sku, "已保存"))
                     except SaveUncertain as exc:
+                        page.discard_pending(str(exc), penalize=False)
                         journal.update(
                             product,
                             status="uncertain",
@@ -253,6 +257,11 @@ class BatchRunner:
                             break
                     except Exception as exc:
                         disconnected = is_connection_failure(exc)
+                        page.discard_pending(
+                            str(exc),
+                            penalize=not disconnected
+                            and not isinstance(exc, Cancelled),
+                        )
                         if disconnected:
                             exc = ListingError(
                                 "浏览器驱动连接已失效，已保留编辑现场并停止本批次；请重新连接 Edge。原错误："

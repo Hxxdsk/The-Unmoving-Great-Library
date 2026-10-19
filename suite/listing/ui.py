@@ -40,7 +40,6 @@ from .browser import EdgeSession
 from .bridge import EdgeBridge, EXTENSION_DIR
 from .runner import BatchRunner
 from .workflow import WorkflowStore
-from .guidance import UserGuide
 from .profile_ui import WorkflowDialog
 
 
@@ -49,8 +48,6 @@ class Worker(QThread):
     message = Signal(str)
     outcome = Signal(object)
     failed = Signal(str)
-    guidance = Signal(str, str)
-    guided = Signal()
 
     def __init__(self, function, parent=None):
         super().__init__(parent)
@@ -78,7 +75,6 @@ class ListingWindow(QMainWindow):
         self.products = []
         self.worker = None
         self.check_job = None
-        self.guide = None
         self.config_path = (
             Path(
                 QStandardPaths.writableLocation(
@@ -165,7 +161,7 @@ class ListingWindow(QMainWindow):
         options.addWidget(label("48 小时发货 · 只保存草稿", "hint"))
         content.addLayout(options)
         profiles = QHBoxLayout()
-        profiles.addWidget(QLabel("用户流程配置"))
+        profiles.addWidget(QLabel("流程配置"))
         self.workflow_profile = ClickOnlyComboBox()
         self.workflow_profile.setMinimumWidth(160)
         self.workflow_profile.setMaximumWidth(320)
@@ -185,16 +181,11 @@ class ListingWindow(QMainWindow):
         self.profile_edit.clicked.connect(self.edit_workflow)
         profiles.addWidget(self.profile_new)
         profiles.addWidget(self.profile_edit)
-        self.manual_enabled = QCheckBox("卡住时由我指导")
-        self.manual_enabled.setChecked(
-            self.preferences.get("manual_guidance", "on") != "off"
-        )
-        profiles.addWidget(self.manual_enabled)
         profiles.addStretch()
         content.addLayout(profiles)
         content.addWidget(
             label(
-                "选择用户流程配置 → 连接 Edge → 开始任务。出现指导提示时在工作页点击正确位置；任务使用独立普通窗口，其他窗口可正常使用。",
+                "选择流程配置 → 连接 Edge → 开始任务。控件变化时自动重新定位；任务使用独立普通窗口，其他窗口可正常使用。",
                 "hint",
             )
         )
@@ -224,22 +215,6 @@ class ListingWindow(QMainWindow):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         outer.addWidget(self.table, 1)
-        self.manual_panel = QWidget()
-        manual = QHBoxLayout(self.manual_panel)
-        manual.setContentsMargins(0, 0, 0, 0)
-        self.manual_text = QLabel()
-        self.manual_text.setWordWrap(True)
-        manual.addWidget(self.manual_text, 1)
-        self.manual_resume = QPushButton("检查当前页面并继续")
-        self.manual_resume.clicked.connect(
-            lambda: self.guide and self.guide.resume.set()
-        )
-        self.manual_skip = QPushButton("跳过当前款")
-        self.manual_skip.clicked.connect(lambda: self.guide and self.guide.skip.set())
-        manual.addWidget(self.manual_resume)
-        manual.addWidget(self.manual_skip)
-        outer.addWidget(self.manual_panel)
-        self.manual_panel.hide()
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         outer.addWidget(self.progress)
@@ -298,9 +273,6 @@ class ListingWindow(QMainWindow):
                 {
                     "directory": self.directory.text(),
                     "workflow_profile": self.workflow_profile.currentText(),
-                    "manual_guidance": (
-                        "on" if self.manual_enabled.isChecked() else "off"
-                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -309,7 +281,7 @@ class ListingWindow(QMainWindow):
         )
 
     def new_workflow_profile(self):
-        name, ok = QInputDialog.getText(self, "新增用户流程配置", "配置名称")
+        name, ok = QInputDialog.getText(self, "新增流程配置", "配置名称")
         if ok and name.strip():
             name = name.strip()[:60]
             store = WorkflowStore(self.workflow_path, name)
@@ -327,20 +299,6 @@ class ListingWindow(QMainWindow):
             ).exec()
         except Exception as exc:
             self.error(str(exc))
-
-    def show_guidance(self, goal, mode):
-        prefix = (
-            "在工作页点击正确控件（仅定位，由程序执行）："
-            if mode == "pick"
-            else "在工作页悬停或点击，程序会观察结果继续；也可点检查继续："
-        )
-        self.manual_text.setText(prefix + goal)
-        self.manual_resume.setVisible(mode == "record")
-        self.manual_panel.show()
-        self.log.appendPlainText("等待用户指导：" + goal)
-
-    def hide_guidance(self):
-        self.manual_panel.hide()
 
     def open_extension(self):
         QApplication.clipboard().setText(str(EXTENSION_DIR.resolve()))
@@ -467,7 +425,6 @@ class ListingWindow(QMainWindow):
             self.workflow_profile,
             self.profile_new,
             self.profile_edit,
-            self.manual_enabled,
         ):
             widget.setEnabled(not value)
         self.install_extension.setEnabled(self.worker is None)
@@ -512,19 +469,9 @@ class ListingWindow(QMainWindow):
                 report,
                 log,
                 memory=memory,
-                guide=self.guide,
             ).run()
 
         self.worker = Worker(run, self)
-        self.guide = (
-            UserGuide(
-                self.worker.cancel, self.worker.guidance.emit, self.worker.guided.emit
-            )
-            if self.manual_enabled.isChecked()
-            else None
-        )
-        self.worker.guidance.connect(self.show_guidance)
-        self.worker.guided.connect(self.hide_guidance)
         self.worker.row.connect(self.update_row)
         self.worker.message.connect(self.log.appendPlainText)
         self.worker.outcome.connect(
@@ -558,8 +505,6 @@ class ListingWindow(QMainWindow):
         worker, self.worker = self.worker, None
         if worker:
             worker.deleteLater()
-        self.guide = None
-        self.hide_guidance()
         self.busy(False)
 
     def check_login(self):

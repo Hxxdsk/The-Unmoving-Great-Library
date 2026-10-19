@@ -174,8 +174,18 @@ class WorkflowStore:
 
     def recipes(self, goal, page, scope="page"):
         return sorted(
-            self.steps().get(self.key(goal, page, scope), []),
-            key=lambda r: (r.get("failures", 0), -r.get("updated", 0)),
+            [
+                r
+                for r in self.steps().get(self.key(goal, page, scope), [])
+                if r.get("successes", 0) > 0
+                and r.get("failures", 0) == 0
+                and r.get("verified", False)
+            ],
+            key=lambda r: (
+                r.get("total_failures", 0),
+                -r.get("successes", 0),
+                -r.get("updated", 0),
+            ),
         )
 
     def hints(self, goal, page, scope="page"):
@@ -185,6 +195,9 @@ class WorkflowStore:
             for rows in self.steps().values()
             for r in rows
             if r.get("goal") == goal
+            and r.get("successes", 0) > 0
+            and r.get("verified", False)
+            and r.get("failures", 0) == 0
             and r.get("scope", "page") == scope
             and r.get("page", "").split("/", 1)[0] == page.split("/", 1)[0]
         ]
@@ -203,6 +216,47 @@ class WorkflowStore:
             for r in records[:3]
         ]
 
+    def avoidances(self, goal, page):
+        records = [
+            r
+            for rows in self.steps().values()
+            for r in rows
+            if r.get("goal") == goal
+            and r.get("failures", 0) > 0
+            and r.get("page", "").split("/", 1)[0] == page.split("/", 1)[0]
+        ]
+        records.sort(key=lambda r: -r.get("last_failed", 0))
+        return [
+            {
+                "目标": r["goal"],
+                "动作": r["actions"],
+                "失败原因": r.get("failure_reason", "未达到预期"),
+            }
+            for r in records[:3]
+        ]
+
+    def reject(
+        self, goal, page, actions, scope="page", source="程序", reason="未达到预期"
+    ):
+        if not actions or len(actions) > 24:
+            return
+        with self.lock:
+            rows = self.steps().setdefault(self.key(goal, page, scope), [])
+            record = next((r for r in rows if r["actions"] == actions), None)
+            if record is None:
+                record = dict(
+                    goal=goal,
+                    page=page,
+                    scope=scope,
+                    source=source,
+                    actions=actions,
+                    successes=0,
+                )
+                rows.insert(0, record)
+            self.failed(record, reason)
+            del rows[6:]
+            self.save()
+
     def remember(self, goal, page, actions, scope="page", source="程序", outcome=""):
         if not actions or len(actions) > 24:
             return
@@ -219,8 +273,10 @@ class WorkflowStore:
             }
             record.update(
                 source=source,
+                verified=True,
                 outcome=outcome,
                 successes=record["successes"] + 1,
+                total_failures=record.get("total_failures", record.get("failures", 0)),
                 failures=0,
                 updated=time.time(),
             )
@@ -229,9 +285,15 @@ class WorkflowStore:
             del rows[4:]
             self.save()
 
-    def failed(self, recipe):
+    def failed(self, recipe, reason="记忆步骤未达到预期"):
         with self.lock:
-            recipe["failures"] = recipe.get("failures", 0) + 1
+            previous_failures = recipe.get("failures", 0)
+            recipe["failures"] = previous_failures + 1
+            recipe["total_failures"] = (
+                recipe.get("total_failures", previous_failures) + 1
+            )
+            recipe["last_failed"] = time.time()
+            recipe["failure_reason"] = str(reason)[:500]
             self.save()
 
 

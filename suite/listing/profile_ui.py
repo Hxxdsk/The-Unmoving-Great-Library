@@ -49,7 +49,7 @@ class WorkflowDialog(QDialog):
             values = (
                 newest["goal"],
                 newest.get("source", ""),
-                f'{sum(r.get("successes",0) for r in rows)} / {sum(r.get("failures",0) for r in rows)}',
+                f'{sum(r.get("successes",0) for r in rows)} / {sum(r.get("total_failures",r.get("failures",0)) for r in rows)}',
                 newest["page"],
             )
             for column, value in enumerate(values):

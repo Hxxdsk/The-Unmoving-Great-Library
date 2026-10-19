@@ -71,7 +71,6 @@ class DouyinPage:
                 next_report = time.monotonic() + 15
             try:
                 if condition():
-                    self.confirm_memory()
                     return
             except BrowserError as exc:
                 if self.page.is_closed() or not re.search(
@@ -125,12 +124,27 @@ class DouyinPage:
                     self.memory = None
         self.pending.clear()
 
-    def discard_pending(self):
-        if self.memory:
+    def discard_pending(self, reason="当前操作未达到预期", penalize=True):
+        if self.memory and penalize:
             for plan in self.pending:
-                if plan.get("_recipe"):
-                    self.memory_failed(plan["_recipe"])
+                try:
+                    self.memory.reject(
+                        **{k: v for k, v in plan.items() if not k.startswith("_")},
+                        reason=reason,
+                    )
+                except Exception as exc:
+                    self.log("失败经验暂不可写：" + str(exc))
         self.pending.clear()
+        self.last_plan = None
+
+    def reject_flow(self, goal, before, actions, reason):
+        if self.memory and actions:
+            try:
+                self.memory.reject(
+                    goal, before, actions, source="流程决策", reason=reason
+                )
+            except Exception as exc:
+                self.log("失败经验暂不可写：" + str(exc))
 
     def memorized(self, goal, root=None, allow_save=False):
         if not self.memory:
@@ -163,6 +177,9 @@ class DouyinPage:
             "当前阶段": self.phase,
             "本次目的": goal,
             "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
+            "需避免的失败方案": (
+                self.memory.avoidances(goal, page_key(self.page)) if self.memory else []
+            ),
             "成功经验": (
                 self.memory.hints(goal, page_key(self.page)) if self.memory else []
             ),
@@ -192,6 +209,18 @@ class DouyinPage:
                 except Cancelled:
                     raise
                 except Exception as exc:
+                    if self.memory and actions and not is_connection_failure(exc):
+                        try:
+                            self.memory.reject(
+                                goal,
+                                before,
+                                actions,
+                                scope=scope,
+                                source="AI",
+                                reason=str(exc),
+                            )
+                        except Exception as memory_error:
+                            self.log("失败经验暂不可写：" + str(memory_error))
                     if not self.guide or not allow_guidance:
                         raise
                     self.log(f"自动定位未完成，转交用户指导：{goal}（{exc}）")
@@ -698,6 +727,12 @@ class DouyinPage:
                 except Exception as exc:
                     error = str(exc)
             if not self.guide or humans >= 3:
+                if self.client and attempt < 3 and time.monotonic() < deadline:
+                    history.append({"action": "前次方案未推进", "reason": error})
+                    self.log("流程尚未推进，AI 根据当前页面重新判断")
+                    self.page.wait_for_timeout(300)
+                    continue
+                self.reject_flow(key, before, actions, error)
                 raise ListingError(error)
             self.log("等待用户完成流程步骤：" + message)
             _, guided = self.guide.run(
@@ -875,13 +910,14 @@ class DouyinPage:
                     )
                     if len(history) < 3 or history[-1] != history[-2]:
                         continue
-                    error = "连续动作未推进，改由用户指导"
+                    error = "连续动作未推进，重新检查页面与失败经验"
                 except Cancelled:
                     raise
                 except Exception as exc:
                     error = str(exc)
                     history.append({"error": error[:160]})
             if not self.guide or human_steps >= 6:
+                self.reject_flow(goal, before, actions, error)
                 raise ListingError(error + "；创建流程未推进，当前款已停止。")
             self.discard_pending()
             self.log("等待用户操作创建入口或悬浮菜单：" + error)
@@ -899,7 +935,7 @@ class DouyinPage:
             actions = guided if human_steps == 1 else actions + guided
             history.append({"action": "用户已操作", "页面状态": self.creation_state()})
             ai_calls = max(0, ai_calls - 2)
-        raise ListingError("创建流程长时间未推进，请检查页面或重新指导。")
+        raise ListingError("创建流程长时间未推进，请检查页面后重试本款。")
 
     def click_generation(self, pattern, destinations, title_text=None):
         """Wait for validation and rerenders before a single generation action."""
@@ -1790,6 +1826,8 @@ class DouyinPage:
         fields, first = self.open_title_recommendations()
         previous = self.page.locator(fields["input"]).input_value(timeout=1500).strip()
 
+        attempted = False
+
         def selected():
             current = self.dom("title_recommendation")
             if not current:
@@ -1802,8 +1840,12 @@ class DouyinPage:
             )
             return (
                 bool(value)
-                and (value != previous or same_title)
-                and not self.dom("first_recommended_title", selector=current["input"])
+                and same_title
+                and (
+                    value != previous
+                    or value == first["text"].strip()
+                    or (attempted and len(value) >= 12)
+                )
             )
 
         for attempt in range(3):
@@ -1814,6 +1856,7 @@ class DouyinPage:
             if not current:
                 fields, current = self.open_title_recommendations()
             first = current
+            attempted = True
             try:
                 self.click_field(self.page.locator(first["selector"]))
             except Cancelled:
@@ -1853,6 +1896,7 @@ class DouyinPage:
         if not selected():
             raise ListingError("第一个推荐标题尚未应用，未保存草稿。")
         self.page.locator(self.dom("title_recommendation")["input"]).blur()
+        self.confirm_memory()
         self.log("已选择网站 AI 推荐的第一个商品标题，准备保存草稿")
 
     def save_draft(self):
