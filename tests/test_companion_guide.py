@@ -61,51 +61,69 @@ def shelf():
     app.processEvents()
 
 
-def test_guide_reserves_space_and_never_covers_input(shelf):
+def test_pet_floats_without_reserving_layout_space_and_keeps_focus(shelf):
     app, owner, field, guide = shelf
-    assert not field.geometry().intersects(guide.geometry())
-    assert guide.note.key == "welcome"
-    assert pet_pixmap().width() <= 76 and pet_pixmap().height() <= 76
+    assert owner.centralWidget().layout().count() == 1
+    assert guide.pet.parent() is owner.centralWidget()
+    assert pet_pixmap().size().width() == 112
     field.setFocus()
     QTest.mouseClick(guide.pet, Qt.MouseButton.LeftButton)
-    assert field.hasFocus()
-    assert field.text() == "原来的操作区域"
-    assert guide.animation.state() == guide.animation.State.Running
+    assert field.hasFocus() and field.text() == "原来的操作区域"
+    assert guide.pose == "wave"
+    guide.move_pet(QPoint(300, 230))
+    assert guide.pet.pos() == QPoint(300, 230)
 
 
-def test_drag_to_edge_peeks_and_stops_timers_until_clicked(shelf):
+def test_four_edges_use_new_peeking_art_and_resume_on_click(shelf):
     app, owner, field, guide = shelf
-    QTest.mousePress(guide.pet, Qt.MouseButton.LeftButton, pos=QPoint(30, 35))
-    QTest.mouseMove(guide.pet, QPoint(-30, 35))
-    QTest.mouseRelease(guide.pet, Qt.MouseButton.LeftButton, pos=QPoint(-30, 35))
+    for edge, point in [
+        ("left", QPoint(0, 250)),
+        ("right", QPoint(968, 250)),
+        ("top", QPoint(400, 0)),
+        ("bottom", QPoint(400, 788)),
+    ]:
+        guide.move_pet(point)
+        guide.finish_drag()
+        assert guide.session.muted and guide.dock == edge
+        assert not guide.timer.isActive() and not guide.bubble.isVisible()
+        assert guide.idle_timer.isActive()  # Occasional peeking blink, no AI calls.
+        QTest.mouseClick(guide.pet, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert not guide.session.muted and guide.timer.isActive()
+    assert pet_pixmap("peek").cacheKey() != pet_pixmap("idle").cacheKey()
+
+
+def test_minimized_or_hidden_windows_pause_animation_and_polling(shelf):
+    app, owner, field, guide = shelf
+    owner.showMinimized()
     app.processEvents()
-    assert guide.session.muted
-    assert guide.height() == 32 and guide.pet.height() == 32
-    assert not guide.timer.isActive()
-    assert guide.animation.state() == guide.animation.State.Stopped
-    assert not guide.bubble.isVisible()
-    QTest.mouseClick(guide.pet, Qt.MouseButton.LeftButton)
+    assert not guide.timer.isActive() and not guide.idle_timer.isActive()
+    owner.showNormal()
     app.processEvents()
-    assert not guide.session.muted and guide.timer.isActive()
+    assert guide.timer.isActive() and guide.idle_timer.isActive()
     owner.hide()
     app.processEvents()
-    assert not guide.timer.isActive()
+    assert not guide.timer.isActive() and not guide.idle_timer.isActive()
 
 
-def test_small_window_starts_compact_and_click_expands_current_note(shelf):
+def test_tutorial_targets_configuration_and_does_not_cover_it(shelf):
+    from PySide6.QtWidgets import QPushButton
+
     app, owner, field, guide = shelf
-    owner.resize(1080, 768)
+    button = QPushButton("API", owner.centralWidget())
+    button.setGeometry(400, 250, 140, 40)
+    button.show()
+    owner.configure = button
+    owner._guide_ai_ready = False
+    guide.refresh()
     app.processEvents()
-    assert guide.compact and guide.height() == 44
-    key = guide.note.key
-    QTest.mouseClick(guide.pet, Qt.MouseButton.LeftButton)
-    app.processEvents()
-    assert not guide.compact and guide.height() == 86
-    assert guide.note.key == key
+    assert guide.target() is button
+    assert guide.marker.geometry() == button.geometry()
+    assert not guide.bubble.geometry().intersects(button.geometry())
 
 
 @pytest.mark.parametrize("component", ["matcher", "generator", "joiner"])
-def test_tk_shelf_is_reserved_and_quiet_state_cancels_callbacks(component):
+def test_tk_pet_floats_and_stops_when_hidden(component):
     import os
     from suite.legacy import load_original, apply_palette
     from suite.registry import get_tool
@@ -119,41 +137,62 @@ def test_tk_shelf_is_reserved_and_quiet_state_cancels_callbacks(component):
         module = load_original(component)
         apply_palette(module, component)
         owner = getattr(module, get_tool(component).app_class)(root)
-        shelf = install_tk_guide(owner, component)
-        root.update_idletasks()
+        guide = install_tk_guide(owner, component)
         root.update()
-        assert shelf.body.width() <= 76 and shelf.body.height() <= 76
-        top = shelf.winfo_y()
-        for child in root.winfo_children():
-            if (
-                child is not shelf
-                and child.winfo_manager() == "pack"
-                and child.winfo_ismapped()
-            ):
-                assert child.winfo_y() + child.winfo_height() <= top
-        assert shelf.tick_id is not None
-        shelf.canvas.event_generate("<ButtonPress-1>", x=shelf.pet_x + 25, y=28)
-        shelf.canvas.event_generate("<Motion>", x=0, y=28, state=0x100)
-        shelf.canvas.event_generate("<ButtonRelease-1>", x=0, y=28)
+        assert guide.canvas.winfo_manager() == "place"
+        assert guide.tick_id is not None
+        guide.pet_x = 0
+        guide.pet_y = 200
+        guide.dock = "left"
+        guide.set_quiet(True)
         root.update()
-        assert shelf.session.muted and shelf.winfo_height() == 32
-        assert shelf.tick_id is None and shelf.bounce_id is None
-        shelf.set_quiet(False)
+        assert guide.session.muted and not guide.bubble.winfo_manager()
+        assert guide.tick_id is None
+        guide.set_quiet(False)
         root.update()
-        assert shelf.tick_id is not None
+        assert guide.tick_id is not None
         root.withdraw()
         root.update()
-        assert shelf.tick_id is None and shelf.bounce_id is None
+        assert guide.tick_id is None and guide.bounce_id is None
     finally:
         root.destroy()
+        del owner, guide
+        import gc
+
+        gc.collect()  # Dispose Tk image/variable cycles on the UI thread.
 
 
-def test_minimized_window_does_not_keep_guide_polling(shelf):
-    app, owner, field, guide = shelf
-    assert guide.timer.isActive()
-    owner.showMinimized()
-    app.processEvents()
-    assert not guide.timer.isActive()
-    owner.showNormal()
-    app.processEvents()
-    assert guide.timer.isActive()
+def test_ai_chat_is_opt_in_async_and_sends_no_private_paths(monkeypatch):
+    import time
+    from suite.guide_support import ChatRequest
+    from suite.guide_content import Note
+    from suite import shared_ai
+
+    prompts = []
+
+    class Client:
+        def generate(self, parts, schema):
+            prompts.append(parts[0]["text"])
+            return {"reply": "先选择主数据表哦。"}
+
+    monkeypatch.setattr(shared_ai, "shared_client", lambda **kwargs: Client())
+    chat = ChatRequest()
+    assert not prompts and not chat.busy
+    assert chat.start(
+        "下一步？",
+        "generator",
+        Note("files", "准备", "选择资料"),
+        {"master": False, "path": "/secret/file.xlsx"},
+    )
+    for _ in range(100):
+        reply = chat.poll()
+        if reply is not None:
+            break
+        time.sleep(0.005)
+    assert reply == "先选择主数据表哦。" and not chat.busy
+    assert "/secret" not in prompts[0]
+
+
+def test_missing_master_has_specific_guidance():
+    note = current_note("generator", {"input": True, "master": False})
+    assert "还需要选择主数据表" in note.text

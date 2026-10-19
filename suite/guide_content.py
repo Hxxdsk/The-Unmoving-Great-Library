@@ -1,4 +1,4 @@
-"""Presentation-only guide state. No files, APIs or task actions are run here."""
+"""Local workflow state for contextual desktop-pet guidance."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,13 +16,13 @@ BOOKS = {
     "hub": [
         Note(
             "welcome",
-            "帕秋莉的小书架",
-            "唔，想整理哪一摞资料？点开一间小工房，我会在窗口底边陪你翻书。",
+            "帕秋莉在这里",
+            "唔，想整理哪一摞资料？点开一间小工房，我会跟着当前步骤陪你一起整理。",
         ),
         Note(
             "quiet",
             "不打扰的小约定",
-            "点击我可以翻提示；在底边拖动我，靠到窗口两侧就会趴好。本次启动不再主动提醒，想找我时点点露出的脑袋。",
+            "点击我可以聊天或查看提示；可以把我拖到窗口任意位置，靠到边缘我就会扒窗休息。本次启动不再主动提醒，想找我时点点露出的脑袋。",
         ),
     ],
     "color": [
@@ -159,12 +159,37 @@ def current_note(component, state):
             "嘘，魔法书正在翻页",
             phase + "。我先轻轻陪着，想停下来就用原来的取消或停止按钮。",
         )
+    if component == "color" and state.get("loaded") and state.get("missing_images"):
+        return Note(
+            "pair",
+            "还缺几张颜色原图",
+            "这款图片还没收齐：请检查款号文件夹中的原图，再为待连接的颜色手动选图。不要把缺图的颜色随便配给其他图片。",
+        )
+    if component == "listing" and state.get("directory") and not state.get("loaded"):
+        return Note(
+            "read",
+            "目录选好了，读入款号吧",
+            "现在点击“读取货号”。读入之后，给需要处理的款填写标题，核对价格和库存，再开始保存草稿。",
+        )
+    if component == "matcher" and state.get("step") == 1:
+        if state.get("js_ready") and not state.get("dd_ready"):
+            return Note(
+                "dd-file",
+                "还缺抖店编码表",
+                "聚水潭表已经选好啦。再选择包含商品ID、商品规格、商家编码的抖店导出表，然后继续下一步。",
+            )
     if component == "hub":
         return notes[0]
+    if component == "generator" and state.get("input") and not state.get("master"):
+        return Note(
+            "materials",
+            "还缺一本主数据表",
+            "商品资料已经选好啦，还需要选择主数据表，才能匹配品类和标准价格。请在这里补上，再生成送审资料。",
+        )
     keys = {
         "color": (
             "export"
-            if state.get("output")
+            if state.get("output") or state.get("ready_export")
             else (
                 "pair"
                 if state.get("loaded")
@@ -251,6 +276,14 @@ def read_state(owner, component):
             directory=bool(text("directory")),
             loaded=bool(getattr(owner, "project", None)),
             output=bool(getattr(owner, "last_output", None)),
+            ready_export=bool(
+                getattr(owner, "export_button", None)
+                and owner.export_button.isEnabled()
+            ),
+            missing_images=bool(
+                getattr(owner, "project", None)
+                and any(not style.images for style in owner.project.styles)
+            ),
         )
     elif component == "listing":
         bridge = getattr(owner, "bridge", None)
@@ -259,12 +292,17 @@ def read_state(owner, component):
                 bridge
                 and (bridge.connected.is_set() or bridge.pairing.data.get("paired"))
             ),
+            directory=bool(text("directory")),
             loaded=bool(owner.products),
             missing_titles=any(not p.title.strip() for p in owner.products),
         )
     elif component == "matcher":
         step = str(getattr(owner, "_guide_step", "1"))
-        state.update(step=3 if "3 / 3" in step else 2 if "2 / 3" in step else 1)
+        state.update(
+            step=3 if "3 / 3" in step else 2 if "2 / 3" in step else 1,
+            js_ready=bool(text("jushuitan_path")),
+            dd_ready=bool(text("doudian_path")),
+        )
     elif component == "generator":
         state.update(input=local_file("var_input"), master=local_file("var_master"))
     elif component == "joiner":

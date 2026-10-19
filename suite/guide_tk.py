@@ -1,251 +1,417 @@
-"""Tk counterpart of the reserved guide shelf. Timers stop when tucked away."""
+"""Floating Tk desktop companion; never packed into the business layout."""
 
+import time
 import tkinter as tk
-from pathlib import Path
-from PIL import Image, ImageTk
-
+from PIL import ImageTk, ImageOps
 from .guide_content import GuideSession, read_state
+from .guide_support import (
+    sprite,
+    candidates,
+    bubble_position,
+    ChatRequest,
+    TUTORIAL_BUTTONS,
+    shape_tk_pet,
+)
 
 
-class TkGuideShelf(tk.Frame):
+class TkGuideShelf:
     def __init__(self, owner, component):
-        root = owner.root
-        super().__init__(root, bg="#f4eff9", height=86)
-        self.owner, self.session = owner, GuideSession(component)
+        self.owner = owner
+        self.root = owner.root
         self.component = component
-        self.state, self.note = {}, None
-        self.tick_id = self.bounce_id = None
+        self.session = GuideSession(component)
+        self.state = {}
+        self.note = None
+        self.tick_id = self.bounce_id = self.chat_id = self.bob_id = None
+        self.dock = None
+        self.ticks = 0
+        self.chat = ChatRequest()
         self.drag_start = None
-        self.pet_x = 12
-        self.compact, self.force_expanded = False, False
-        self.pack_propagate(False)
-        existing = [c for c in root.winfo_children() if c is not self]
-        self.pack(side="bottom", fill="x", before=existing[0] if existing else None)
-        self.canvas = tk.Canvas(
-            self, bg="#f4eff9", highlightthickness=0, height=86, takefocus=False
+        self.pose = "idle"
+        self.pose_until = 0
+        self.last_touch = time.monotonic()
+        self.pet_x = self.pet_y = 0
+        self.visible = True
+        self.closed = False
+        self.images = {
+            name: ImageTk.PhotoImage(sprite(name), master=self.root)
+            for name in [
+                "idle",
+                "blink",
+                "wave",
+                "read",
+                "think",
+                "sleep",
+                "peek",
+                "peek-blink",
+                "side",
+                "side-blink",
+            ]
+        }
+        self.images["right"] = ImageTk.PhotoImage(
+            ImageOps.mirror(sprite("side")), master=self.root
         )
-        self.canvas.pack(fill="both", expand=True)
-        path = Path(__file__).resolve().parent.parent / "assets/guide-patchouli.png"
-        with Image.open(
-            path if path.exists() else path.with_name("patchouli.png")
-        ) as image:
-            image = image.convert("RGBA")
-            image.thumbnail((76, 76), Image.Resampling.LANCZOS)
-            self.body = ImageTk.PhotoImage(image, master=root)
-            self.head = ImageTk.PhotoImage(
-                image.crop((0, 18, image.width, min(52, image.height))), master=root
-            )
+        self.images["right-blink"] = ImageTk.PhotoImage(
+            ImageOps.mirror(sprite("side-blink")), master=self.root
+        )
+        bg = self.root.cget("bg")
+        self.canvas = tk.Canvas(
+            self.root,
+            width=112,
+            height=112,
+            highlightthickness=0,
+            bg=bg,
+            takefocus=False,
+            cursor="hand2",
+        )
         self.pet_id = self.canvas.create_image(
-            self.pet_x, 4, image=self.body, anchor="nw", tags="pet"
+            56, 112, image=self.images["idle"], anchor="s"
         )
         self.bubble = tk.Frame(
-            self.canvas,
-            bg="#fffafd",
-            highlightbackground="#e1d7ed",
-            highlightthickness=1,
+            self.root, bg="#fffafd", highlightbackground="#bda4d8", highlightthickness=1
         )
-        header = tk.Frame(self.bubble, bg="#fffafd")
-        header.pack(fill="x", padx=9, pady=(3, 0))
-        self.heading = tk.Label(
-            header,
-            bg="#fffafd",
-            fg="#76549b",
-            font=("Microsoft YaHei UI", 9, "bold"),
-            anchor="w",
-        )
-        self.heading.pack(side="left", fill="x", expand=True)
+        row = tk.Frame(self.bubble, bg="#fffafd")
+        row.pack(fill="x", padx=8, pady=(5, 0))
+        self.heading = tk.Label(row, bg="#fffafd", fg="#76549b", anchor="w")
+        self.heading.pack(side="left", expand=True, fill="x")
         for title, command in [
             ("‹", lambda: self.turn(-1)),
-            ("翻一页 ›", lambda: self.turn(1)),
-            ("趴一会儿", lambda: self.set_quiet(True)),
+            ("›", lambda: self.turn(1)),
+            ("×", self.collapse),
         ]:
             tk.Button(
-                header,
+                row,
                 text=title,
                 command=command,
+                takefocus=False,
+                bd=0,
                 bg="#fffafd",
                 fg="#76549b",
-                relief="flat",
-                bd=0,
-                takefocus=False,
-                font=("Microsoft YaHei UI", 9),
-            ).pack(side="left", padx=3)
+            ).pack(side="left")
         self.message = tk.Label(
             self.bubble,
             bg="#fffafd",
             fg="#554365",
-            font=("Microsoft YaHei UI", 9),
+            wraplength=304,
             justify="left",
             anchor="w",
         )
-        self.message.pack(fill="both", expand=True, padx=9, pady=(0, 3))
-        self.bubble_id = self.canvas.create_window(
-            98, 3, window=self.bubble, anchor="nw", width=700, height=78
-        )
-        self.canvas.tag_bind("pet", "<ButtonPress-1>", self.press)
-        self.canvas.tag_bind("pet", "<B1-Motion>", self.drag)
-        self.canvas.tag_bind("pet", "<ButtonRelease-1>", self.release)
-        self.canvas.bind("<Configure>", lambda _: self.arrange())
-        self.bind("<Destroy>", self.destroyed, add="+")
-        self.bind("<Unmap>", lambda _: self.pause(), add="+")
-        self.bind(
-            "<Map>",
-            lambda _: (
-                self.refresh() if not self.tick_id and not self.session.muted else None
-            ),
-            add="+",
-        )
-        root.bind("<Configure>", self.resized, add="+")
-        root.bind(
-            "<Unmap>",
-            lambda event: self.pause() if event.widget is root else None,
-            add="+",
-        )
-        root.bind(
-            "<Map>",
-            lambda event: (
-                self.refresh()
-                if event.widget is root and not self.tick_id and not self.session.muted
-                else None
-            ),
-            add="+",
-        )
+        self.message.pack(fill="x", padx=10, pady=6)
+        row = tk.Frame(self.bubble, bg="#fffafd")
+        row.pack(fill="x", padx=8, pady=(0, 7))
+        self.question = tk.Entry(row)
+        self.question.pack(side="left", expand=True, fill="x")
+        self.question.bind("<Return>", lambda _: self.ask_ai())
+        self.ask = tk.Button(row, text="问帕秋莉", command=self.ask_ai, takefocus=False)
+        self.ask.pack(side="right")
+        self.borders = [
+            tk.Frame(self.root, bg="#b48bdd", takefocus=False) for _ in range(4)
+        ]
+        self.canvas.bind("<ButtonPress-1>", self.press)
+        self.canvas.bind("<B1-Motion>", self.drag)
+        self.canvas.bind("<ButtonRelease-1>", self.release)
+        self.canvas.bind("<Double-Button-1>", lambda _: self.collapse())
+        self.root.bind("<Configure>", self.resized, add="+")
+        self.root.bind("<Unmap>", self.unmap, add="+")
+        self.root.bind("<Map>", self.mapped, add="+")
+        self.root.bind("<Destroy>", self.destroyed, add="+")
+        self.root.after_idle(self.start)
+
+    def start(self):
+        if self.closed:
+            return
+        self.pet_x = max(0, self.root.winfo_width() - 126)
+        self.pet_y = max(0, self.root.winfo_height() - 300)
+        self.arrange()
         self.refresh()
+        self.animate()
+
+    def pause(self):
+        for name in ("tick_id", "bounce_id", "chat_id", "bob_id"):
+            identifier = getattr(self, name)
+            if identifier:
+                try:
+                    self.root.after_cancel(identifier)
+                except tk.TclError:
+                    pass
+                setattr(self, name, None)
+
+    def unmap(self, event):
+        if event.widget is self.root:
+            self.visible = False
+            self.pause()
+
+    def mapped(self, event):
+        if event.widget is self.root:
+            self.visible = True
+            if not self.tick_id:
+                self.refresh()
+            if not self.bounce_id:
+                self.animate()
+            if self.chat.busy and not self.chat_id:
+                self.poll_chat()
+
+    def destroyed(self, event):
+        if event.widget is self.root:
+            self.closed = True
+            self.pause()
+            self.chat.stop()
 
     def refresh(self):
+        if self.tick_id:
+            self.root.after_cancel(self.tick_id)
         self.tick_id = None
-        if not self.winfo_exists() or self.session.muted:
+        if self.closed or not self.visible or self.session.muted:
             return
         self.state = read_state(self.owner, self.component)
-        self.show_note(self.session.choose(self.state))
-        self.tick_id = self.after(1800, self.refresh)
+        note = self.session.choose(self.state)
+        if note != self.note:
+            self.show_note(note)
+            self.interact("think" if note.key.startswith("setup") else "wave")
+        self.arrange()
+        self.tick_id = self.root.after(1400, self.refresh)
 
     def show_note(self, note):
-        if self.note != note:
-            self.note = note
-            self.heading.configure(text="帕秋莉 · " + note.title)
-            self.message.configure(text=note.text)
+        self.note = note
+        self.heading.configure(text="帕秋莉 · " + note.title)
+        self.message.configure(text=note.text)
+        self.bubble.place(x=4, y=4, width=330)
         self.arrange()
 
     def turn(self, delta):
-        if self.compact:
-            self.force_expanded = True
-            self.compact = False
-            self.configure(height=86)
-            self.canvas.configure(height=86)
-            self.message.pack(fill="both", expand=True, padx=9, pady=(0, 3))
-            note = self.session.choose(self.state)
-        else:
-            note = self.session.turn(self.state, delta)
-        self.show_note(note)
-        self.bounce(0)
+        self.show_note(self.session.turn(self.state, delta))
+        self.interact("read")
 
-    def bounce(self, index):
-        if self.bounce_id:
-            self.after_cancel(self.bounce_id)
-            self.bounce_id = None
-        if self.session.muted:
+    def collapse(self):
+        self.bubble.place_forget()
+        for border in self.borders:
+            border.place_forget()
+
+    def target(self):
+        labels = TUTORIAL_BUTTONS.get((self.component, self.note.key), ())
+        stack = list(self.root.winfo_children())
+        while labels and stack:
+            widget = stack.pop()
+            if widget in (self.bubble, self.canvas):
+                continue
+            try:
+                text = str(widget.cget("text"))
+                if (
+                    widget.winfo_ismapped()
+                    and any(label in text for label in labels)
+                    and widget.winfo_class() in ("Button", "TButton")
+                ):
+                    return widget
+            except tk.TclError:
+                pass
+            stack.extend(widget.winfo_children())
+        for item in candidates(self.owner, self.component, self.note.key):
+            if isinstance(item, tk.Widget) and item.winfo_ismapped():
+                return item
+            # Resolve Tk variables to their live Entry instead of guessing by text.
+            if isinstance(item, tk.Variable):
+                stack = list(self.root.winfo_children())
+                while stack:
+                    widget = stack.pop()
+                    if widget is self.bubble:
+                        continue
+                    try:
+                        if (
+                            str(widget.cget("textvariable")) == str(item)
+                            and widget.winfo_ismapped()
+                        ):
+                            return widget
+                    except tk.TclError:
+                        pass
+                    stack.extend(widget.winfo_children())
+        return None
+
+    def arrange(self):
+        if self.closed:
             return
-        offsets = [0, -2, -4, -5, -4, -2, 0, 1, 0]
-        self.canvas.coords(self.pet_id, self.pet_x, 4 + offsets[index])
-        if index + 1 < len(offsets):
-            self.bounce_id = self.after(35, lambda: self.bounce(index + 1))
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        self.pet_x = max(0, min(w - 112, self.pet_x))
+        self.pet_y = max(0, min(h - 112, self.pet_y))
+        if self.session.muted:
+            if self.dock == "left":
+                self.pet_x = -48
+            elif self.dock == "right":
+                self.pet_x = w - 64
+            elif self.dock == "top":
+                self.pet_y = -38
+            else:
+                self.pet_y = h - 72
+        self.canvas.place(x=self.pet_x, y=self.pet_y, width=112, height=112)
+        tk.Misc.lift(self.canvas)
+        if not self.note or self.session.muted or not self.bubble.winfo_manager():
+            return
+        target = self.target()
+        rect = None
+        if target:
+            rect = (
+                target.winfo_rootx() - self.root.winfo_rootx(),
+                target.winfo_rooty() - self.root.winfo_rooty(),
+                target.winfo_width(),
+                target.winfo_height(),
+            )
+        width = min(330, max(210, w - 20))
+        self.message.configure(wraplength=width - 22)
+        height = self.bubble.winfo_reqheight()
+        x, y = bubble_position((w, h), rect, (width, height), (self.pet_x, self.pet_y))
+        self.bubble.place(x=x, y=y, width=width)
+        self.bubble.lift()
+        tk.Misc.lift(self.canvas)
+        for border in self.borders:
+            border.place_forget()
+        if rect:
+            x, y, rw, rh = rect
+            for border, geometry in zip(
+                self.borders,
+                [
+                    (x, y, rw, 2),
+                    (x, y + rh - 2, rw, 2),
+                    (x, y, 2, rh),
+                    (x + rw - 2, y, 2, rh),
+                ],
+            ):
+                border.place(
+                    x=geometry[0], y=geometry[1], width=geometry[2], height=geometry[3]
+                )
+                border.lift()
 
-    def press(self, event):
-        self.drag_start = event.x_root
-        self.start_x = self.pet_x
-        self.moved = False
-
-    def drag(self, event):
-        if self.drag_start is not None:
-            dx = event.x_root - self.drag_start
-            self.moved |= abs(dx) > 6
-            self.pet_x = max(0, min(self.winfo_width() - 80, self.start_x + dx))
+    def resized(self, event):
+        if event.widget is self.root:
             self.arrange()
 
+    def press(self, event):
+        self.drag_start = (event.x_root, event.y_root, self.pet_x, self.pet_y)
+        self.moved = False
+        self.interact("wave")
+
+    def drag(self, event):
+        if not self.drag_start:
+            return
+        x, y, px, py = self.drag_start
+        dx, dy = event.x_root - x, event.y_root - y
+        self.moved |= abs(dx) + abs(dy) > 6
+        self.pet_x = px + dx
+        self.pet_y = py + dy
+        self.collapse()
+        self.arrange()
+
     def release(self, event):
-        if self.drag_start is None:
+        if not self.drag_start:
             return
         self.drag_start = None
         if self.moved:
-            if self.pet_x < 28 or self.pet_x > self.winfo_width() - 108:
-                self.set_quiet(True)
+            w, h = self.root.winfo_width(), self.root.winfo_height()
+            edges = {
+                "left": self.pet_x,
+                "right": w - 112 - self.pet_x,
+                "top": self.pet_y,
+                "bottom": h - 112 - self.pet_y,
+            }
+            self.dock = min(edges, key=edges.get) if min(edges.values()) < 30 else None
+            self.set_quiet(bool(self.dock))
         elif self.session.muted:
             self.set_quiet(False)
+        elif self.bubble.winfo_manager():
+            self.collapse()
         else:
-            self.turn(1)
+            self.show_note(self.session.choose(self.state))
+            self.interact("wave")
 
     def set_quiet(self, quiet):
         self.session.muted = quiet
-        height = 32 if quiet else 44 if self.compact else 86
-        self.configure(height=height)
-        self.canvas.configure(height=height)
-        self.canvas.itemconfigure(self.pet_id, image=self.head if quiet else self.body)
+        if self.bob_id:
+            self.root.after_cancel(self.bob_id)
+            self.bob_id = None
+        self.canvas.coords(self.pet_id, 56, 112)
         if quiet:
-            for attr in ("tick_id", "bounce_id"):
-                identifier = getattr(self, attr)
-                if identifier:
-                    self.after_cancel(identifier)
-                    setattr(self, attr, None)
-            self.pet_x = (
-                0 if self.pet_x < self.winfo_width() / 2 else self.winfo_width() - 80
-            )
+            self.dock = self.dock or "right"
+            self.collapse()
+            if self.tick_id:
+                self.root.after_cancel(self.tick_id)
+                self.tick_id = None
         else:
+            self.dock = None
+            self.pet_x = max(40, min(self.root.winfo_width() - 152, self.pet_x))
+            self.pet_y = max(40, min(self.root.winfo_height() - 152, self.pet_y))
             self.refresh()
+            self.show_note(self.session.choose(self.state))
         self.arrange()
 
-    def arrange(self):
-        width = self.winfo_width()
-        if width < 120:
-            return
-        self.pet_x = max(0, min(width - 80, self.pet_x))
-        self.canvas.coords(self.pet_id, self.pet_x, 0 if self.session.muted else 4)
-        bubble_width = min(820, width - 106)
-        x = (
-            self.pet_x + 86
-            if self.pet_x + 86 + bubble_width < width
-            else self.pet_x - bubble_width - 6
-        )
-        x = max(4, min(width - bubble_width - 4, x))
-        overlaps = x < self.pet_x + 80 and x + bubble_width > self.pet_x
-        self.canvas.itemconfigure(
-            self.bubble_id,
-            state="hidden" if self.session.muted or overlaps else "normal",
-            width=bubble_width,
-            height=36 if self.compact else 78,
-        )
-        self.canvas.coords(self.bubble_id, x, 3)
-        self.message.configure(wraplength=max(100, bubble_width - 22))
+    def interact(self, pose):
+        self.last_touch = time.monotonic()
+        self.pose = pose
+        self.pose_until = time.monotonic() + 1.2
+        if not self.session.muted and self.drag_start is None:
+            self.bob(0)
 
-    def pause(self):
-        for attr in ("tick_id", "bounce_id"):
-            identifier = getattr(self, attr)
-            if identifier:
-                try:
-                    self.after_cancel(identifier)
-                except tk.TclError:
-                    pass
-                setattr(self, attr, None)
+    def bob(self, index):
+        if self.bob_id:
+            self.root.after_cancel(self.bob_id)
+            self.bob_id = None
+        offsets = [0, -2, -4, -6, -4, -2, 0]
+        self.canvas.coords(self.pet_id, 56, 112 + offsets[index])
+        if index + 1 < len(offsets) and self.visible and not self.session.muted:
+            self.bob_id = self.root.after(40, lambda: self.bob(index + 1))
 
-    def resized(self, event):
-        if event.widget is not self.owner.root or not self.winfo_exists():
+    def animate(self):
+        if self.bounce_id:
+            self.root.after_cancel(self.bounce_id)
+        self.bounce_id = None
+        if self.closed or not self.visible:
             return
-        compact = event.height < 820 and not self.force_expanded
-        if compact != self.compact:
-            self.compact = compact
-            if compact:
-                self.message.pack_forget()
-            else:
-                self.message.pack(fill="both", expand=True, padx=9, pady=(0, 3))
-            if not self.session.muted:
-                height = 44 if compact else 86
-                self.configure(height=height)
-                self.canvas.configure(height=height)
+        self.ticks += 1
+        blink = self.ticks % 44 in (0, 1)
+        if self.session.muted:
+            name = (
+                "right"
+                if self.dock == "right"
+                else "side" if self.dock == "left" else "peek"
+            )
+            if blink:
+                name += "-blink"
+        elif time.monotonic() < self.pose_until:
+            name = self.pose
+        elif self.state.get("busy"):
+            name = "read" if self.ticks % 40 < 34 else "think"
+        elif time.monotonic() - self.last_touch > 45:
+            name = "sleep"
+        else:
+            name = "blink" if blink else "idle"
+        self.canvas.itemconfigure(self.pet_id, image=self.images[name])
+        if getattr(self, "_shape_name", None) != name:
+            shape_tk_pet(self.canvas, name)
+            self._shape_name = name
+        self.bounce_id = self.root.after(120, self.animate)
+
+    def ask_ai(self):
+        if self.note and self.chat.start(
+            self.question.get(), self.component, self.note, self.state
+        ):
+            self.asked_key = self.note.key
+            self.ask.configure(state="disabled")
+            self.message.configure(text="唔，让我翻翻魔法书…")
+            self.interact("read")
+            self.poll_chat()
+
+    def poll_chat(self):
+        self.chat_id = None
+        if self.closed:
+            return
+        result = self.chat.poll()
+        if result is not None:
+            self.message.configure(
+                text=result if self.note.key == self.asked_key else self.note.text
+            )
+            self.ask.configure(state="normal")
+            self.question.delete(0, "end")
+            self.interact("wave")
             self.arrange()
-
-    def destroyed(self, event):
-        if event.widget is self:
-            self.pause()
+        elif self.chat.busy and self.visible:
+            self.chat_id = self.root.after(120, self.poll_chat)
 
 
 def install_tk_guide(owner, component):

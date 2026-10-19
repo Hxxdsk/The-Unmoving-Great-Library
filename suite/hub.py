@@ -71,6 +71,7 @@ class Hub(QMainWindow):
         self.ai_status = label("", "hint")
         ai_row.addWidget(self.ai_status, 1)
         configure = QPushButton("API / 模型 · 管理")
+        self.configure = configure
         configure.clicked.connect(self.configure_ai)
         ai_row.addWidget(configure)
         ai_layout.addLayout(ai_row)
