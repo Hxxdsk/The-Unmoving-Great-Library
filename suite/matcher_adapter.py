@@ -1,8 +1,19 @@
 import tkinter as tk
 from tkinter import ttk
 import unicodedata
+import re
 
 from . import palette as p
+
+
+def size_key(value):
+    """Ignore balanced parenthesized notes, keeping the remaining size exact."""
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    while True:
+        stripped = re.sub(r"\([^()]*\)", "", text)
+        if stripped == text:
+            return re.sub(r"\s+", "", text).upper()
+        text = stripped
 
 
 def color_key(text):
@@ -96,6 +107,26 @@ def colors_label(parent, values, width=420):
 
 def apply(module):
     cls = module.ExcelMatcherApp
+    build_lookup = cls._build_js_lookup
+    resolve_code = cls._resolve_code
+
+    def normalized_lookup(self):
+        lookup = {}
+        for (style, color, size), codes in build_lookup(self).items():
+            normalized = size_key(size)
+            if not normalized:
+                continue
+            target = lookup.setdefault((style, color, normalized), [])
+            for code in codes:
+                if code not in target:
+                    target.append(code)
+        return lookup
+
+    def normalized_resolve(self, pid, dd_color, dd_size, js_lookup):
+        return resolve_code(self, pid, dd_color, size_key(dd_size), js_lookup)
+
+    cls._build_js_lookup = normalized_lookup
+    cls._resolve_code = normalized_resolve
     page_header = cls._page_header
 
     def header(self, step, title, description):
