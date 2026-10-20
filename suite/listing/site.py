@@ -268,6 +268,76 @@ class DouyinPage:
     def tab(self, text):
         self.click(text)
 
+    def activate_creation_control(self, target, pattern, token="", arm=False):
+        """Validate a live creation control atomically; never force disabled UI."""
+        self.check()
+        safe_target(target)
+        return target.evaluate(
+            r"""(node,args)=>{
+              const e=node.closest('button,a,[role=button],[role=menuitem]')||node;
+              const text=(e.innerText||e.textContent||e.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
+              const matches=new RegExp(args.pattern,'s');
+              if(new RegExp(args.forbidden).test(text)||text.includes('保存草稿'))throw new Error('禁止操作非创建入口');
+              const records=window.__glCreationClicks||(window.__glCreationClicks=Object.create(null));
+              if(args.token&&records[args.token]?.clicked)return {status:'submitted'};
+              if(!matches.test(text)||!e.isConnected)return {status:'changed'};
+              const style=getComputedStyle(e);
+              if(!e.getClientRects().length||style.visibility==='hidden'||style.display==='none'||Number(style.opacity)===0)return {status:'hidden'};
+              if(e.matches(':disabled')||e.closest('[aria-disabled=true],[disabled],[inert]')||e.getAttribute('aria-busy')==='true')return {status:'disabled'};
+              e.scrollIntoView({block:'nearest',inline:'nearest',behavior:'instant'});
+              const r=e.getBoundingClientRect(),left=Math.max(0,r.left),right=Math.min(innerWidth,r.right),top=Math.max(0,r.top),bottom=Math.min(innerHeight,r.bottom);
+              if(right<=left||bottom<=top)return {status:'hidden'};
+              const hit=document.elementFromPoint((left+right)/2,(top+bottom)/2);
+              if(!hit||!e.contains(hit))return {status:'covered'};
+              if(args.token&&!records[args.token]){
+                const record=records[args.token]={clicked:false};
+                const capture=event=>{
+                  const target=event.target instanceof Element?event.target.closest('button,a,[role=button],[role=menuitem]'):null;
+                  if(!target)return;
+                  const name=(target.innerText||target.textContent||target.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
+                  if(!matches.test(name))return;
+                  record.clicked=true;
+                  document.removeEventListener('click',capture,true);
+                };
+                document.addEventListener('click',capture,true);
+              }
+              if(args.arm)return {status:'ready'};
+              if(args.token)records[args.token].clicked=true;
+              e.click();
+              return {status:'submitted'};
+            }""",
+            dict(
+                pattern=pattern.pattern,
+                forbidden=FORBIDDEN.pattern,
+                token=token,
+                arm=arm,
+            ),
+            timeout=1500,
+        )["status"]
+
+    def creation_click_recorded(self, token):
+        return self.page.evaluate(
+            "key=>!!window.__glCreationClicks?.[key]?.clicked", token
+        )
+
+    def reveal_creation_menu(self, trigger):
+        """Re-enter a remounted hover trigger, then consume its menu immediately."""
+        self.check()
+        safe_target(trigger)
+        trigger.evaluate(
+            "e=>e.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'})",
+            timeout=1000,
+        )
+        rect = trigger.bounding_box(timeout=1000)
+        if not rect:
+            return
+        viewport = self.page.evaluate("()=>({width:innerWidth,height:innerHeight})")
+        x = max(1, min(viewport["width"] - 2, rect["x"] + rect["width"] / 2))
+        y = max(1, min(viewport["height"] - 2, rect["y"] + rect["height"] / 2))
+        outside = rect["y"] - 8 if rect["y"] > 9 else rect["y"] + rect["height"] + 8
+        self.page.mouse.move(x, max(1, min(viewport["height"] - 2, outside)))
+        self.page.mouse.move(x, y)
+
     def open_create_menu(self):
         # The real Douyin control opens its single-product menu on hover.
         if self.visible_control("单商品") is not None:
@@ -791,6 +861,7 @@ class DouyinPage:
                 self.memory_failed(recipe)
         attempted, ai_calls, human_steps = set(), 0, 0
         transient_failures = {}
+        entry_submitted_at = None
         loading_since = None
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
@@ -810,6 +881,13 @@ class DouyinPage:
                         self.log("流程记忆暂不可写：" + str(exc))
                 self.confirm_memory()
                 return
+            if (
+                entry_submitted_at is not None
+                and time.monotonic() - entry_submitted_at
+                < (12 if state == "loading" else 3)
+            ):
+                self.page.wait_for_timeout(100)
+                continue
             if state == "loading":
                 loading_since = loading_since or time.monotonic()
                 if time.monotonic() - loading_since < 3:
@@ -833,20 +911,84 @@ class DouyinPage:
                     self.page.wait_for_timeout(100)
                     continue
                 identity = (kind, str(descriptor))
-                if identity in attempted and option is None:
+                if option is None and descriptor.get("tag") == "a":
                     kind, identity = "click", ("click", str(descriptor))
+                if identity in attempted and option is None:
+                    if transient_failures.get(identity, 0) < 4:
+                        attempted.discard(identity)
+                    else:
+                        kind, identity = "click", ("click", str(descriptor))
                 if identity not in attempted:
                     attempted.add(identity)
                     safe_target(target)
                     actions.append({"kind": kind, "target": descriptor})
                     try:
                         if kind == "hover":
-                            target.hover(timeout=1500)
+                            self.reveal_creation_menu(target)
+                            menu_started = time.monotonic()
+                            menu_deadline = menu_started + 0.8
+                            opened = False
+                            reentered = False
+                            while time.monotonic() < menu_deadline:
+                                self.check()
+                                fresh = self.visible_control(
+                                    re.compile(r"^(单商品|单个商品|独立商品|单品商品)$")
+                                )
+                                if fresh is not None:
+                                    item = fresh.evaluate(DESCRIBE, timeout=1000)
+                                    if (
+                                        self.activate_creation_control(
+                                            fresh,
+                                            re.compile(
+                                                r"^(单商品|单个商品|独立商品|单品商品)$"
+                                            ),
+                                        )
+                                        == "submitted"
+                                    ):
+                                        actions.append(
+                                            {"kind": "click", "target": item}
+                                        )
+                                        entry_submitted_at = time.monotonic()
+                                        self.log("已通过当前可见单商品菜单继续")
+                                        opened = True
+                                        break
+                                if ready():
+                                    opened = True
+                                    break
+                                if (
+                                    not reentered
+                                    and time.monotonic() - menu_started > 0.18
+                                ):
+                                    current_entry = self.visible_control(
+                                        re.compile(
+                                            r"^(新建商品|创建商品|新增商品|创建货品)[\s⌄∨▼▾]*$"
+                                        )
+                                    )
+                                    if current_entry is not None:
+                                        self.reveal_creation_menu(current_entry)
+                                    reentered = True
+                                self.page.wait_for_timeout(80)
+                            if not opened:
+                                transient_failures[identity] = (
+                                    transient_failures.get(identity, 0) + 1
+                                )
+                        elif option is not None:
+                            if (
+                                self.activate_creation_control(
+                                    target,
+                                    re.compile(
+                                        r"^(单商品|单个商品|独立商品|单品商品)$"
+                                    ),
+                                )
+                                != "submitted"
+                            ):
+                                attempted.discard(identity)
+                            else:
+                                entry_submitted_at = time.monotonic()
                         else:
-                            # A hover portal can collapse or animate as the
-                            # pointer crosses its gap. Use the visible item's
-                            # own click handler after normal pointer retries.
-                            target.click(timeout=1500)
+                            target.click(timeout=1500, no_wait_after=True)
+                            if descriptor.get("tag") == "a":
+                                entry_submitted_at = time.monotonic()
                     except Cancelled:
                         raise
                     except Exception as exc:
@@ -861,23 +1003,29 @@ class DouyinPage:
                         if option is not None:
                             if entry is not None:
                                 try:
-                                    entry.hover(timeout=1000)
+                                    self.reveal_creation_menu(entry)
                                 except Exception:
                                     pass
                             fresh = self.visible_control(
                                 re.compile(r"^(单商品|单个商品|独立商品|单品商品)$")
                             )
-                            if fresh is not None and fresh.is_enabled():
+                            if fresh is not None:
                                 try:
-                                    safe_target(fresh)
-                                    fresh.evaluate(
-                                        "e=>{if(!e.isConnected||!e.getClientRects().length||getComputedStyle(e).visibility==='hidden')throw new Error('菜单已收起');e.click()}"
+                                    result = self.activate_creation_control(
+                                        fresh,
+                                        re.compile(
+                                            r"^(单商品|单个商品|独立商品|单品商品)$"
+                                        ),
                                     )
-                                    self.log("已通过当前可见单商品菜单继续")
-                                except Exception:
-                                    if not ready() and transient_failures[identity] < 3:
+                                    if result == "submitted":
+                                        entry_submitted_at = time.monotonic()
+                                        self.log("已通过当前可见单商品菜单继续")
+                                    elif transient_failures[identity] < 4:
                                         attempted.discard(identity)
-                            elif transient_failures[identity] < 3:
+                                except Exception:
+                                    if not ready() and transient_failures[identity] < 4:
+                                        attempted.discard(identity)
+                            elif transient_failures[identity] < 4:
                                 attempted.discard(identity)
                         self.page.wait_for_timeout(250)
                         continue
@@ -938,14 +1086,23 @@ class DouyinPage:
         raise ListingError("创建流程长时间未推进，请检查页面后重试本款。")
 
     def click_generation(self, pattern, destinations, title_text=None):
-        """Wait for validation and rerenders before a single generation action."""
-        clicked_at, attempts, repairs = 0.0, 0, 0
+        """Poll current controls and track actual clicks before retrying a rerender."""
+        repairs = 0
         started = time.monotonic()
+        token = "generate-" + uuid.uuid4().hex
+        reports = set()
+
+        def submitted():
+            self.generation_pending = True
+            self.log("生成点击已确认，等待网站返回下一页")
+            return True
 
         def observe():
-            nonlocal clicked_at, attempts, repairs
+            nonlocal repairs
             if self.creation_state() in destinations:
                 return True
+            if self.creation_click_recorded(token):
+                return submitted()
             button = self.visible_control(pattern)
             if button is None:
                 return False
@@ -975,24 +1132,36 @@ class DouyinPage:
                         repairs += 1
                         self.log("已重新提交本款手填标题，等待生成按钮可用")
                         return False
-            if not button.is_enabled() or self.dom("busy"):
+            if self.dom("busy"):
                 return False
-            if clicked_at:
-                # Let the existing request advance; do not generate twice.
-                return True
-            if attempts >= 3:
-                raise ListingError("生成入口多次变化，请检查当前页面上传和标题校验")
-            safe_target(button)
-            attempts += 1
+            status = self.activate_creation_control(button, pattern, token, arm=True)
+            if status == "submitted":
+                return submitted()
+            if status != "ready":
+                if status not in reports:
+                    reports.add(status)
+                    self.log("生成入口正在校验、重绘或被遮挡，等待当前控件恢复")
+                return False
             try:
-                button.click(timeout=1500)
-                clicked_at = time.monotonic()
-                self.generation_pending = True
-                return True
-            except Exception as exc:
+                button.click(timeout=1500, no_wait_after=True)
+                return submitted()
+            except BrowserError as exc:
+                if is_connection_failure(exc):
+                    raise
                 if self.creation_state() in destinations:
                     return True
-                self.log("生成按钮状态已变化，重新检查：" + str(exc).splitlines()[0])
+                if self.creation_click_recorded(token):
+                    return submitted()
+                # Reacquire the button. An animating/detached control should not
+                # consume a fixed three-attempt budget for the whole stage.
+                fresh = self.visible_control(pattern)
+                if fresh is not None and not self.dom("busy"):
+                    status = self.activate_creation_control(fresh, pattern, token)
+                    if status == "submitted":
+                        return submitted()
+                self.log(
+                    "生成入口暂时变化，重新读取当前控件：" + str(exc).splitlines()[0]
+                )
                 return False
 
         def progress():
@@ -1000,8 +1169,12 @@ class DouyinPage:
                 return observe()
             except BrowserError as exc:
                 self.check()
+                if is_connection_failure(exc):
+                    raise
                 if self.creation_state() in destinations:
                     return True
+                if self.creation_click_recorded(token):
+                    return submitted()
                 self.log(
                     "生成页正在变化，重新读取当前页面：" + str(exc).splitlines()[0]
                 )
