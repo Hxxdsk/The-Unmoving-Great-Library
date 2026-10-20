@@ -236,8 +236,6 @@ class ListingWindow(QMainWindow):
         actions.addWidget(self.start)
         outer.addLayout(actions)
         self.start.setEnabled(False)
-        from suite.guide_qt import install_qt_guide
-        install_qt_guide(self, "listing", lambda _: self.check_login())
         self.connection_timer = QTimer(self)
         self.connection_timer.timeout.connect(self.update_connection_status)
         self.connection_timer.start(3000)
@@ -487,7 +485,6 @@ class ListingWindow(QMainWindow):
         self.worker.start()
 
     def update_row(self, sku, status, message, percent):
-        self._guide_phase = str(message)
         for row, product in enumerate(self.products):
             if product.sku == sku:
                 for column, value in ((7, status), (8, f"{percent}%"), (9, message)):

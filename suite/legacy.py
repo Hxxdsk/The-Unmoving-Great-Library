@@ -143,7 +143,5 @@ def run_legacy(key: str):
                 recolor(child)
         recolor(root)
     decorate_header(root, key)
-    from .guide_tk import install_tk_guide
-    install_tk_guide(app, key)
     root.mainloop()
     return app

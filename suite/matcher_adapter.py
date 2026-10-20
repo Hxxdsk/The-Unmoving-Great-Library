@@ -130,7 +130,6 @@ def apply(module):
     page_header = cls._page_header
 
     def header(self, step, title, description):
-        self._guide_step = step
         methods = {
             "步骤 1 / 3": "选择聚水潭与抖店导出表。",
             "步骤 2 / 3": "关联款号与对应的商品 PID。",

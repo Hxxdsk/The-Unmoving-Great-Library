@@ -125,8 +125,6 @@ class Window(QMainWindow):
         saved = self.settings.get("directory")
         if saved and Path(saved).is_dir():
             self.set_directory(Path(saved))
-        from suite.guide_qt import install_qt_guide
-        install_qt_guide(self, "color")
 
     def _build(self):
         central = QWidget()

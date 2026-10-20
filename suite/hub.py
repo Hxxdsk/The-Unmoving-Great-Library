@@ -36,8 +36,6 @@ class Hub(QMainWindow):
         self.logs = logs or (base / "GreatLibraryToolbox" / "logs")
         self.logs.mkdir(parents=True, exist_ok=True)
         self._build()
-        from .guide_qt import install_qt_guide
-        install_qt_guide(self, "hub", lambda _: self.configure_ai())
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_children)
         self.timer.start(750)
@@ -233,9 +231,6 @@ class Hub(QMainWindow):
     def refresh_ai(self):
         data = self.ai_manager.snapshot()
         count = sum(data["model"] in entry["models"] for entry in data["entries"])
-        self._guide_ai_ready = bool(data["model"] and count)
-        if hasattr(self, "patchouli_guide"):
-            self.patchouli_guide.refresh()
         self.ai_status.setText(
             f"{data['model'].removeprefix('models/')} · {count} 条 API 轮询"
             if count
