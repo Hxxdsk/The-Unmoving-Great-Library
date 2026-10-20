@@ -94,7 +94,7 @@ def apply_palette(module, key):
 
 
 def decorate_header(root, key):
-    """Only replace the old subtitle; the interactive mascot owns its own shelf."""
+    """Replace the header description without changing tool behavior."""
     import tkinter as tk
     def replace_subtitle(widget):
         for child in widget.winfo_children():

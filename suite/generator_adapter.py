@@ -28,7 +28,7 @@ def apply(module):
         title_box = top.winfo_children()[0]
         labels = title_box.winfo_children()
         if len(labels) > 1:
-            labels[1].configure(text="资料和主数据备好了吗？我陪你逐页核对。")
+            labels[1].configure(text="根据商品资料和主数据生成送审表。")
 
         def recolor(widget):
             try:

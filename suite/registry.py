@@ -37,10 +37,10 @@ def register_tool(tool: Tool):
 
 
 for _tool in (
-    Tool("color", "商品图片颜色配对", "AI 识色 · 商品编码命名", "我来认衣服的颜色，你替拿不准的色号夹好书签。"),
-    Tool("matcher", "商品编码匹配工具", "聚水潭 ↔ 抖店", "把两本表里的同款、同色、同尺码轻轻连起来。", "商品编码匹配工具.py", "ExcelMatcherApp"),
-    Tool("generator", "送审资料生成器", "规则匹配 · Excel 导出", "面料小字和送审档案，我们一起收进整齐的格子。", "送审资料生成器.py", "App"),
-    Tool("joiner", "送审拼接图", "智能排序 · 正反面拼接", "正面站前面，背面跟上来，把同款照片装订成双。", "送审拼接图.py", "ImageJoinerApp"),
+    Tool("color", "商品图片颜色配对", "AI 识色 · 商品编码命名", "识别图片颜色，配对商品编码并导出命名图片。"),
+    Tool("matcher", "商品编码匹配工具", "聚水潭 ↔ 抖店", "按款号、颜色和尺码匹配聚水潭与抖店商品编码。", "商品编码匹配工具.py", "ExcelMatcherApp"),
+    Tool("generator", "送审资料生成器", "规则匹配 · Excel 导出", "匹配主数据和面料信息，生成送审资料表。", "送审资料生成器.py", "App"),
+    Tool("joiner", "送审拼接图", "智能排序 · 正反面拼接", "识别正反面，将同款图片成对拼接导出。", "送审拼接图.py", "ImageJoinerApp"),
 ):
     register_tool(_tool)
 

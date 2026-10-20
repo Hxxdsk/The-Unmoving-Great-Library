@@ -60,7 +60,7 @@ class Hub(QMainWindow):
         row.setContentsMargins(25, 20, 25, 20)
         titles = QVBoxLayout()
         titles.addWidget(label("大图书馆 · 商品资料工具箱", "suiteTitle"))
-        titles.addWidget(label("帕秋莉的小工房，今天一起整理哪一摞？", "suiteSubtitle"))
+        titles.addWidget(label("商品图片处理、编码匹配和资料生成", "suiteSubtitle"))
         row.addLayout(titles)
         row.addStretch()
         row.addWidget(mascot(78))

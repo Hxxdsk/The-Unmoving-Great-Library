@@ -9,7 +9,7 @@ def register_extensions(register):
             "listing",
             "抖店批量上架",
             "逐货号填写 · 保存草稿",
-            "你收好素材和标题，我陪每一款走到草稿箱。",
+            "按货号批量填写商品信息并保存抖店草稿。",
             entrypoint="suite.listing.ui:main",
             dependencies=(
                 Dependency("playwright.sync_api", "playwright"),

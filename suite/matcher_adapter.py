@@ -132,9 +132,9 @@ def apply(module):
     def header(self, step, title, description):
         self._guide_step = step
         methods = {
-            "步骤 1 / 3": "把两本表摆好，我来陪你认款。",
-            "步骤 2 / 3": "先认款再认颜色，别着急翻页哦。",
-            "步骤 3 / 3": "给同色夹上书签，核对好再装订。",
+            "步骤 1 / 3": "选择聚水潭与抖店导出表。",
+            "步骤 2 / 3": "关联款号与对应的商品 PID。",
+            "步骤 3 / 3": "配对颜色并导出商品编码。",
         }
         page_header(self, step, title, methods.get(step, "连接颜色 → 导出"))
 
