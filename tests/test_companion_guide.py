@@ -31,7 +31,7 @@ def test_pet_has_no_tutorial_or_api_code():
 
 
 def test_atlas_frames_have_padding_and_peeking_has_no_detached_row():
-    assert len(ART) + len(PEEK) >= 24
+    assert len(ART) + len(PEEK) >= 36
     for name in [*ART, *PEEK, "right", "right-blink"]:
         image = sprite(name)
         assert image.size == SIZE and image.mode == "RGBA"
@@ -49,34 +49,72 @@ def test_pickup_dangling_landing_and_idle_use_different_frames():
     engine = PetAnimator(0)
     engine.frame(0)
     engine.pickup(1)
-    assert engine.frame(1).pose == "lift-start"
-    engine.drag(180, 0.05)
+    assert engine.frame(1).pose == "pickup-1"
+    engine.drag(180, 0.05, now=1)
     frames = {engine.frame(1 + i * 0.04).pose for i in range(35)}
-    assert {"lift", "lift-left", "lift-right", "lift-blink"} <= frames
+    assert {"hang-center", "hang-left", "hang-right", "hang-return"} <= frames
     assert abs(engine.velocity) > 0
     engine.release(now=3)
-    assert engine.frame(3).pose == "lower"
-    assert engine.frame(3.2).pose == "land"
+    assert engine.frame(3).pose == "land-1"
+    assert engine.frame(3.2).pose == "land-4"
     assert engine.frame(3.6).pose == "idle"
-    assert engine.frame(54).pose == "drowsy"
-    assert engine.frame(54.3).pose == "sleep"
+    assert engine.frame(53).pose == "idle"
+    assert engine.frame(54.3).pose == "blink-hold"
 
 
-def test_changes_have_intermediate_frames_and_pause_preserves_time():
+def test_rendering_does_not_depend_on_previous_draws_or_reuse_old_pixels():
+    from PIL import Image
+
+    first, second = PetAnimator(0), PetAnimator(0)
+    first.click(1)
+    second.click(1)
+    for i in range(20):
+        first.frame(1 + i * 0.025)
+    first.last_image = Image.new("RGBA", SIZE, (255, 0, 255, 255))
+    # The old renderer used last_image as another crossfade source, creating
+    # multi-generation trails. The same event timeline must now be pixel-equal.
+    a, b = first.frame(1.52).image, second.frame(1.52).image
+    assert a.tobytes() == b.tobytes()
+    assert a.getpixel((0, 0))[3] == 0
+    first.frame(2)
+    assert first.mode == "idle"
+
+
+def test_explicit_inbetweens_and_pause_preserve_action_time():
+    from suite.guide_support import WAVE_FRAMES
+
     engine = PetAnimator(0)
-    before = engine.frame(0).image
     engine.click(1)
-    start = engine.frame(1).image
-    middle = engine.frame(1.05).image
-    end = engine.frame(1.11).image
-    assert ImageChops.difference(middle, start).getbbox()
-    assert ImageChops.difference(middle, end).getbbox()
+    frames = [engine.frame(1 + i * 0.075 + 0.001).pose for i in range(len(WAVE_FRAMES))]
+    assert frames == list(WAVE_FRAMES)
+    shown = engine.frame(1.11).image
     engine.set_paused(True, 1.12)
-    held = engine.frame(50).image
-    assert ImageChops.difference(held, end).getbbox() is None
+    assert engine.frame(50).image.tobytes() == shown.tobytes()
     engine.set_paused(False, 50)
-    assert engine.mode == "wave"
-    assert engine.frame(50.01).pose == "greet"
+    assert engine.frame(50.01).pose == "wave-2"
+
+
+def test_atlas_extraction_excludes_detached_noise_across_nominal_cells():
+    from PIL import Image, ImageDraw
+    from suite.guide_support import _sprite_objects
+
+    atlas = Image.new("RGBA", (320, 320))
+    draw = ImageDraw.Draw(atlas)
+    for row in range(4):
+        for col in range(4):
+            x, y = col * 80 + 15, row * 80 + 8
+            draw.rectangle((x, y, x + 42, y + 60), fill=(130, 80, 180, 255))
+            draw.rectangle(
+                (col * 80 + 76, row * 80 + 71, col * 80 + 78, row * 80 + 73),
+                fill=(255, 0, 255, 255),
+            )
+    frames = _sprite_objects(atlas, 16)
+    assert len(frames) == 16
+    for frame in frames:
+        assert not any(
+            r == 255 and b == 255 and alpha
+            for r, g, b, alpha in frame.get_flattened_data()
+        )
 
 
 @pytest.fixture
@@ -108,7 +146,7 @@ def test_qt_pet_only_adds_character_and_leaves_inputs_and_callbacks_alone(pet_wi
     QTest.mouseClick(guide.pet, Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
     assert field.hasFocus() and field.text() == "原输入"
     assert guide.engine.mode == "wave" and not callback
-    assert guide.timer.interval() == 33
+    assert guide.timer.interval() == 20
 
 
 def test_qt_dragging_from_dock_clears_dock_and_uses_lift(pet_window):
@@ -132,7 +170,7 @@ def test_qt_dragging_from_dock_clears_dock_and_uses_lift(pet_window):
         guide.engine.frame(guide.engine.started + 0.6)
         guide.tick()
         assert guide.pet.image.size().width() == SIZE[0]
-        assert guide.pet.mask().boundingRect().height() <= SIZE[1]
+        assert guide.pet.mask().isEmpty()
 
 
 def test_qt_hidden_and_minimized_pet_stops_and_manual_pause_persists(pet_window):
@@ -225,3 +263,84 @@ def test_qt_moving_repaints_the_old_pet_region_without_residue(pet_window):
     app.processEvents()
     current = owner.centralWidget().grab().toImage()
     assert baseline.copy(old) == current.copy(old)
+
+
+def test_changing_to_smaller_pose_clears_old_body_pixels_in_place(pet_window):
+    from PySide6.QtGui import QPainter
+
+    app, owner, field, guide, callback = pet_window
+    guide.pet.hide()
+    app.processEvents()
+    background = owner.centralWidget().grab().toImage()
+    guide.pet.show()
+    guide.move_pet(QPoint(300, 260))
+    guide.tick()
+    app.processEvents()
+    guide.engine.release("bottom")
+    guide.engine.started -= 1
+    guide.tick()
+    app.processEvents()
+    rect = guide.pet.geometry()
+    expected = background.copy(rect)
+    painter = QPainter(expected)
+    painter.drawImage(0, 0, guide.pet.image)
+    painter.end()
+    actual = owner.centralWidget().grab().toImage().copy(rect)
+    assert expected == actual
+
+
+def test_windows_tk_region_refresh_invalidates_parent_and_transfers_ownership(
+    monkeypatch,
+):
+    import ctypes
+    from ctypes import wintypes
+    from unittest.mock import Mock
+    from suite import guide_support
+
+    gdi, user = Mock(), Mock()
+    handles = iter(range(100, 10000))
+    gdi.CreateRectRgn.side_effect = lambda *args: next(handles)
+    user.SetWindowRgn.return_value = 1
+    user.GetParent.return_value = 44
+
+    def get_rect(hwnd, pointer):
+        rect = ctypes.cast(pointer, ctypes.POINTER(wintypes.RECT)).contents
+        rect.left = rect.top = 0
+        rect.right, rect.bottom = SIZE
+        return 1
+
+    user.GetClientRect.side_effect = get_rect
+    monkeypatch.setattr(guide_support.sys, "platform", "win32")
+    monkeypatch.setattr(
+        ctypes,
+        "WinDLL",
+        lambda name, **kw: gdi if name == "gdi32" else user,
+        raising=False,
+    )
+    guide_support.shape_tk_pet(SimpleNamespace(winfo_id=lambda: 33), sprite("idle"))
+    user.InvalidateRect.assert_called_once()
+    assert user.InvalidateRect.call_args.args[0] == 44
+    deleted = [call.args[0] for call in gdi.DeleteObject.call_args_list]
+    assert 100 not in deleted  # Transferred to Windows, never delete twice.
+
+
+def test_idle_subpixel_motion_is_not_quantized_to_pixel_jumps():
+    engine = PetAnimator(0)
+    images = [engine.frame(i * 0.02).image.tobytes() for i in range(15)]
+    assert len(set(images)) >= 12
+
+
+def test_incomplete_pet_assets_fall_back_without_breaking_the_tool(monkeypatch):
+    from suite import guide_support
+
+    def broken(filename):
+        raise ValueError("incomplete atlas")
+
+    guide_support.sprite.cache_clear()
+    try:
+        with monkeypatch.context() as local:
+            local.setattr(guide_support, "_atlas_frames", broken)
+            image = guide_support.sprite("idle")
+            assert image.size == SIZE and image.getbbox()
+    finally:
+        guide_support.sprite.cache_clear()

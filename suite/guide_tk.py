@@ -162,6 +162,7 @@ class DesktopPet:
         self.tick()
 
     def tick(self):
+        started = time.monotonic()
         self.stop_timer()
         if self.closed or not self.visible:
             return
@@ -172,13 +173,15 @@ class DesktopPet:
             self.place()
         frame = self.engine.frame()
         # Replace the only canvas image. No old sprite items remain underneath.
-        self.photo = ImageTk.PhotoImage(frame.image, master=self.root)
-        self.canvas.itemconfigure(self.pet_id, image=self.photo)
+        photo = ImageTk.PhotoImage(frame.image, master=self.root)
+        self.canvas.delete(self.pet_id)
+        self.pet_id = self.canvas.create_image(0, 0, anchor="nw", image=photo)
+        self.photo = photo
         shape_tk_pet(self.canvas, frame.image)
         if not self.engine.paused:
-            self.tick_id = self.root.after(
-                FRAME_MS if frame.active or moving else 66, self.tick
-            )
+            budget = FRAME_MS if frame.active or moving else 50
+            wait = max(1, round(budget - (time.monotonic() - started) * 1000))
+            self.tick_id = self.root.after(wait, self.tick)
 
 
 def install_tk_guide(owner, component=None):

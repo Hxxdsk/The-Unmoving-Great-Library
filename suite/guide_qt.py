@@ -1,7 +1,7 @@
 """Qt desktop pet only: no tutorials, workflow inspection or API access."""
 
 from PySide6.QtCore import Qt, QTimer, QEvent, QPoint
-from PySide6.QtGui import QImage, QPainter, QBitmap, QRegion
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QWidget
 import time
 from .guide_support import (
@@ -26,6 +26,9 @@ class Pet(QWidget):
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setToolTip("拖动移动，靠边吸附；点击互动，双击睡觉；右键暂停或继续动画。")
         self.image = QImage()
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
 
     def paintEvent(self, event):
         # QWidget repaints the parent background first. Never accumulate sprites
@@ -143,7 +146,7 @@ class DesktopPet(QWidget):
             (point.x(), point.y()), (self.host.width(), self.host.height())
         )
         self.pet.move(x, y)
-        self.host.update(old.united(self.pet.geometry()))
+        self.host.repaint(old.united(self.pet.geometry()).adjusted(-2, -2, 2, 2))
 
     def finish_drag(self):
         point = (self.pet.x(), self.pet.y())
@@ -166,7 +169,7 @@ class DesktopPet(QWidget):
         else:
             self.snap.cancel()
             self.pet.move(x, y)
-            self.host.update(old.united(self.pet.geometry()))
+            self.host.repaint(old.united(self.pet.geometry()).adjusted(-2, -2, 2, 2))
 
     def refresh(self):
         """Compatibility hook from the home window; no workflow state is read."""
@@ -181,19 +184,24 @@ class DesktopPet(QWidget):
             old = self.pet.geometry()
             point, moving = self.snap.sample()
             self.pet.move(*point)
-            self.host.update(old.united(self.pet.geometry()))
+            self.host.repaint(old.united(self.pet.geometry()).adjusted(-2, -2, 2, 2))
         frame = self.engine.frame()
         image = frame.image
         self.pet.image = QImage(
             image.tobytes(), image.width, image.height, QImage.Format.Format_RGBA8888
         ).copy()
-        self.pet.setMask(QRegion(QBitmap.fromImage(self.pet.image.createAlphaMask())))
-        self.host.update(self.pet.geometry())
+        # A changing native mask can leave stale pixels on Windows. Paint the
+        # complete transparent child rectangle against its parent every time.
+        self.host.repaint(self.pet.geometry().adjusted(-2, -2, 2, 2))
         self.pet.update()
         if self.engine.paused:
             self.timer.stop()
         else:
-            self.timer.start(FRAME_MS if frame.active or moving else 66)
+            interval = FRAME_MS if frame.active or moving else 50
+            if self.timer.interval() != interval:
+                self.timer.setInterval(interval)
+            if not self.timer.isActive():
+                self.timer.start()
 
 
 def install_qt_guide(owner, component=None, action=None):
