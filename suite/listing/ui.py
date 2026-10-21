@@ -160,6 +160,24 @@ class ListingWindow(QMainWindow):
         options.addWidget(self.inventory)
         options.addWidget(label("48 小时发货 · 只保存草稿", "hint"))
         content.addLayout(options)
+        parallel = QHBoxLayout()
+        parallel.addWidget(QLabel("同时进行任务数"))
+        self.concurrency = QSpinBox()
+        self.concurrency.setRange(1, 999999)
+        try:
+            self.concurrency.setValue(int(self.preferences.get("concurrency", "1")))
+        except ValueError:
+            self.concurrency.setValue(1)
+        parallel.addWidget(self.concurrency)
+        self.all_parallel = QCheckBox("全部并行")
+        self.all_parallel.setChecked(self.preferences.get("all_parallel") == "true")
+        self.concurrency.setEnabled(not self.all_parallel.isChecked())
+        self.all_parallel.toggled.connect(lambda checked: self.concurrency.setEnabled(not checked))
+        self.all_parallel.setToolTip("本次勾选且可执行的所有货号同时进行，每款使用独立标签页。")
+        parallel.addWidget(self.all_parallel)
+        parallel.addWidget(label("完成页保留 · 新任务在同一窗口新开标签页", "hint"))
+        parallel.addStretch()
+        content.addLayout(parallel)
         profiles = QHBoxLayout()
         profiles.addWidget(QLabel("流程配置"))
         self.workflow_profile = ClickOnlyComboBox()
@@ -273,6 +291,8 @@ class ListingWindow(QMainWindow):
                 {
                     "directory": self.directory.text(),
                     "workflow_profile": self.workflow_profile.currentText(),
+                    "concurrency": str(self.concurrency.value()),
+                    "all_parallel": "true" if self.all_parallel.isChecked() else "false",
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -421,12 +441,15 @@ class ListingWindow(QMainWindow):
             self.reset,
             self.price,
             self.inventory,
+            self.concurrency,
+            self.all_parallel,
             self.ai,
             self.workflow_profile,
             self.profile_new,
             self.profile_edit,
         ):
             widget.setEnabled(not value)
+        self.concurrency.setEnabled(not value and not self.all_parallel.isChecked())
         self.install_extension.setEnabled(self.worker is None)
         self.stop.setEnabled(value)
         for row in range(self.table.rowCount()):
@@ -454,6 +477,8 @@ class ListingWindow(QMainWindow):
         root = Path(self.directory.text())
         price = self.price.value()
         stock = self.inventory.value()
+        concurrency = self.concurrency.value()
+        all_parallel = self.all_parallel.isChecked()
 
         def run(cancel, report, log):
             client.cancel = cancel
@@ -469,6 +494,8 @@ class ListingWindow(QMainWindow):
                 report,
                 log,
                 memory=memory,
+                concurrency=concurrency,
+                all_parallel=all_parallel,
             ).run()
 
         self.worker = Worker(run, self)

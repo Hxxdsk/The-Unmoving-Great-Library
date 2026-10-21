@@ -368,10 +368,9 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
         os.name == "nt"
         or not executable
         or not Path(node).exists()
-        or not os.environ.get("DISPLAY")
     ):
         pytest.skip(
-            "连接协议夹具需要 Linux Chromium、Node 和 X11；不代表真实 Edge 扩展测试"
+            "连接协议夹具需要 Linux Chromium 和 Node；不代表真实 Edge 扩展测试"
         )
     bridge = EdgeBridge()
     config = bridge.start()
@@ -380,6 +379,7 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
     browser = subprocess.Popen(
         [
             executable,
+            *([] if os.environ.get("DISPLAY") else ["--headless=new"]),
             "--no-sandbox",
             "--disable-background-networking",
             "--no-first-run",
@@ -538,7 +538,11 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
         def reconnect():
             try:
                 with FixtureSession(config, threading.Event()) as session:
-                    assert len(session.context.pages) == (2 if background_popup else 1)
+                    assert len(session.context.pages) >= 3
+                    assert any(
+                        p.locator("#sku").count() and p.locator("#sku").input_value() == product.sku
+                        for p in session.context.pages
+                    ), "重连应保留已保存的商品编辑页"
                     session.check_login()
                     assert "fixture-login=already-logged-in" in session.page.evaluate(
                         "document.cookie"

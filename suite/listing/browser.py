@@ -34,11 +34,7 @@ class EdgeSession:
         self.page = page
 
     def next_work_page(self):
-        old = list(self.context.pages)
         self.page = self.context.new_page()
-        for page in old:
-            if not page.is_closed():
-                page.close()
         return self.page
 
     def new_work_page(self):
@@ -67,7 +63,7 @@ class EdgeSession:
                 raise ListingError("没有可用的抖店操作页，请重新连接 Edge。")
             self.context = self.browser.contexts[0]
             self.context.set_default_timeout(12000)
-            self.new_work_page()
+            self.next_work_page()
             return self
         except Exception as exc:
             self.close()
