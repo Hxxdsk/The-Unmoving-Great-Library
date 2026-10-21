@@ -79,7 +79,7 @@ def test_live_three_column_color_rows_override_shifted_legacy_mapping(
         assert s.page.evaluate("window.remounted") is True
 
 
-def test_filename_size_chart_only_is_excluded_and_ai_invalids_are_ignored(
+def test_content_size_chart_is_excluded_and_ai_invalids_do_not_drop_garments(
     tmp_path, session
 ):
     product = make_product(tmp_path)
@@ -93,7 +93,11 @@ def test_filename_size_chart_only_is_excluded_and_ai_invalids_are_ignored(
     class Classifier(Client):
         def generate(self, parts, schema):
             assert "尺码表" in parts[0]["text"]
-            return {"reference_ids": [], "invalid_ids": ["0", "1"]}
+            return {
+                "reference_ids": [],
+                "size_chart_ids": ["2"],
+                "invalid_ids": ["0", "1"],
+            }
 
     prepare_color_sources(Classifier(), product, threading.Event())
     assert chart not in product.color_photos

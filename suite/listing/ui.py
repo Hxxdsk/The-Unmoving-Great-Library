@@ -172,8 +172,12 @@ class ListingWindow(QMainWindow):
         self.all_parallel = QCheckBox("全部并行")
         self.all_parallel.setChecked(self.preferences.get("all_parallel") == "true")
         self.concurrency.setEnabled(not self.all_parallel.isChecked())
-        self.all_parallel.toggled.connect(lambda checked: self.concurrency.setEnabled(not checked))
-        self.all_parallel.setToolTip("本次勾选且可执行的所有货号同时进行，每款使用独立标签页。")
+        self.all_parallel.toggled.connect(
+            lambda checked: self.concurrency.setEnabled(not checked)
+        )
+        self.all_parallel.setToolTip(
+            "本次勾选且可执行的所有货号同时进行，每款使用独立标签页。"
+        )
         parallel.addWidget(self.all_parallel)
         parallel.addWidget(label("完成页保留 · 新任务在同一窗口新开标签页", "hint"))
         parallel.addStretch()
@@ -292,7 +296,9 @@ class ListingWindow(QMainWindow):
                     "directory": self.directory.text(),
                     "workflow_profile": self.workflow_profile.currentText(),
                     "concurrency": str(self.concurrency.value()),
-                    "all_parallel": "true" if self.all_parallel.isChecked() else "false",
+                    "all_parallel": (
+                        "true" if self.all_parallel.isChecked() else "false"
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -386,7 +392,7 @@ class ListingWindow(QMainWindow):
                 f'{min(5,len(product.images["800"]))} / {min(5,len(product.images["3.4"]))}',
                 str(len(product.images["详情"])),
                 f'{len(product.images["白底"])} / {len(product.images["水洗标"])}',
-                f'{len(product.color_photos)} / {len(product.images["尺码"])}',
+                f'{len(product.images["颜色"])} / AI识别',
                 "资料缺失" if product.issues else reason or "待处理",
                 "0%",
                 "；".join(product.issues),

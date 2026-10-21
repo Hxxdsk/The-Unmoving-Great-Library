@@ -30,9 +30,13 @@ def test_details_replaced_before_generation_and_main_retained(tmp_path, session)
         audit = s.page.evaluate("window.audit")
         generation = next(e for e in audit if e["event"] == "generation")
         assert generation["details"] == ["1.png", "2.png", "尺码.png"]
-        details = next(e for e in audit if e.get("field") == "wizard-detail")
-        assert details["files"] == ["1.png", "2.png", "尺码.png"]
-        assert audit.index(details) < audit.index(generation)
+        details = [e for e in audit if e.get("field") == "wizard-detail"]
+        assert [name for event in details for name in event["files"]] == [
+            "1.png",
+            "2.png",
+            "尺码.png",
+        ]
+        assert all(audit.index(event) < audit.index(generation) for event in details)
         assert len(s.page.locator("#main img").all()) == 5
         assert not page.details_prepared
         assert generation["title"] == product.title

@@ -575,7 +575,14 @@ class DouyinPage:
             control = self.page.locator(item["selector"])
             if control.evaluate("e => !!e.files?.length"):
                 control.set_input_files([])
-        self.upload(selector, paths)
+        if "商品详情" in names and len(paths) > 1:
+            # A batch FileList preserves selection order, but merchant upload
+            # callbacks can append in completion order. Finish each image first.
+            for path in paths:
+                self.check()
+                self.upload(selector, (path,))
+        else:
+            self.upload(selector, paths)
         if self.photo_count(selector) != len(paths):
             raise ListingError("字段图片数量与当前货号资料不符。")
 

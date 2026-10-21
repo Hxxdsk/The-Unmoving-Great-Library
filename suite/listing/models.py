@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from functools import cmp_to_key
 import re
 import threading
 from dataclasses import dataclass
@@ -25,10 +27,32 @@ class SaveUncertain(ListingError):
 
 
 def natural_key(value):
+    # Do not emit an empty text prefix for digit-leading names: that used to
+    # place 1.jpg ahead of !0.jpg. Keep punctuation and numeric runs explicit.
     return tuple(
-        (1, int(s)) if s.isdigit() else (0, s.casefold())
-        for s in re.split(r"(\d+)", str(value))
+        (
+            (1, int(part))
+            if part.isdecimal() and part.isascii()
+            else (2, part.casefold()) if part[0].isalnum() else (0, part.casefold())
+        )
+        for part in re.findall(r"[0-9]+|[^\W\d_]+|.", str(value))
     )
+
+
+if os.name == "nt":
+    import ctypes
+
+    _logical_compare = ctypes.WinDLL("shlwapi").StrCmpLogicalW
+    _logical_compare.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p)
+    _logical_compare.restype = ctypes.c_int
+else:
+    _logical_compare = None
+
+
+def filename_key(value):
+    """Explorer name-ascending order on Windows, deterministic fallback elsewhere."""
+    name = str(value)
+    return cmp_to_key(_logical_compare)(name) if _logical_compare else natural_key(name)
 
 
 @dataclass
@@ -40,6 +64,7 @@ class Product:
     title: str = ""
     color_references: tuple[Path, ...] = ()
     color_uploads: tuple[Path, ...] | None = None
+    sources_prepared: bool = False
 
     @property
     def color_photos(self):
@@ -67,7 +92,7 @@ def scan_products(root: Path) -> list[Product]:
     if not root.is_dir():
         raise ListingError("请选择包含货号文件夹的目录。")
     products = []
-    for folder in sorted(root.iterdir(), key=lambda p: natural_key(p.name)):
+    for folder in sorted(root.iterdir(), key=lambda p: filename_key(p.name)):
         if not folder.is_dir() or folder.name.startswith(("_", ".")):
             continue
         images, issues = {}, []
@@ -82,7 +107,7 @@ def scan_products(root: Path) -> list[Product]:
                             for p in directory.iterdir()
                             if p.is_file() and p.suffix.lower() in IMAGES
                         ),
-                        key=lambda p: natural_key(p.name),
+                        key=lambda p: filename_key(p.name),
                     )
                 )
                 if directory.is_dir()
@@ -97,8 +122,6 @@ def scan_products(root: Path) -> list[Product]:
                     f"{name}/{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode()
                 )
         images["尺码"] = tuple(p for p in images["颜色"] if p.stem == "尺码")
-        if not images["尺码"]:
-            issues.append("颜色文件夹缺少名为尺码的图片（如尺码.jpg）")
         if len(images["白底"]) > 1:
             issues.append("白底文件夹应只有一张图片")
         products.append(Product(folder, images, issues, digest.hexdigest()))

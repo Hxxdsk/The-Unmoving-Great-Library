@@ -55,7 +55,13 @@ class Client:
     def generate(self, parts, schema):
         self.calls += 1
         if "reference_ids" in schema.get("properties", {}):
-            return {"reference_ids": [], "invalid_ids": []}
+            return {
+                "reference_ids": [],
+                "size_chart_ids": [
+                    schema["properties"]["size_chart_ids"]["items"]["enum"][-1]
+                ],
+                "invalid_ids": [],
+            }
         return {
             "colors": [
                 {
@@ -364,14 +370,8 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
         shutil.which("node")
         or "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node"
     )
-    if (
-        os.name == "nt"
-        or not executable
-        or not Path(node).exists()
-    ):
-        pytest.skip(
-            "连接协议夹具需要 Linux Chromium 和 Node；不代表真实 Edge 扩展测试"
-        )
+    if os.name == "nt" or not executable or not Path(node).exists():
+        pytest.skip("连接协议夹具需要 Linux Chromium 和 Node；不代表真实 Edge 扩展测试")
     bridge = EdgeBridge()
     config = bridge.start()
     profile = tmp_path / "fixture-browser"
@@ -540,7 +540,8 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
                 with FixtureSession(config, threading.Event()) as session:
                     assert len(session.context.pages) >= 3
                     assert any(
-                        p.locator("#sku").count() and p.locator("#sku").input_value() == product.sku
+                        p.locator("#sku").count()
+                        and p.locator("#sku").input_value() == product.sku
                         for p in session.context.pages
                     ), "重连应保留已保存的商品编辑页"
                     session.check_login()

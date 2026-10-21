@@ -11,6 +11,7 @@ from .models import Journal, ListingError, Cancelled, SaveUncertain
 from .browser import EdgeSession, is_connection_failure
 from .site import DouyinPage
 from .vision import analyze, prepare_color_sources
+from suite.cache import ResultCache
 
 
 @contextlib.contextmanager
@@ -63,6 +64,7 @@ class BatchRunner:
         self.memory, self.guide = memory, guide
         self.concurrency = max(1, int(concurrency))
         self.all_parallel = all_parallel
+        self.cache = ResultCache("listing-vision-v2", self.root / "_抖店识别缓存")
         self.client, self.cancel = client, cancel
         self.price, self.inventory = price, inventory
         self.report, self.log, self.session_factory = report, log, session_factory
@@ -87,6 +89,7 @@ class BatchRunner:
             with runtime.session() as login:
                 login.next_work_page()
                 self.log(login.check_login())
+
             def run_product(product):
                 worker = copy.copy(self)
                 # API fallback/model state belongs to this task, not its peers.
@@ -100,6 +103,7 @@ class BatchRunner:
 
             with ThreadPoolExecutor(max_workers=limit) as pool:
                 futures = set()
+
                 def submit():
                     while not self.cancel.is_set() and len(futures) < limit:
                         product = next(pending_products, None)
@@ -107,10 +111,16 @@ class BatchRunner:
                             break
                         can_run, reason = journal.resumable(product)
                         if product.issues or not can_run:
-                            self.report(product.sku, "跳过", "；".join(product.issues) or reason, 0)
+                            self.report(
+                                product.sku,
+                                "跳过",
+                                "；".join(product.issues) or reason,
+                                0,
+                            )
                             results.append((product.sku, "跳过"))
                             continue
                         futures.add(pool.submit(run_product, product))
+
                 submit()
                 while futures:
                     done, futures = wait(futures, return_when=FIRST_COMPLETED)
@@ -132,9 +142,7 @@ class BatchRunner:
             can_run, reason = journal.resumable(product)
             if product.issues or not can_run:
                 status = "跳过"
-                message = (
-                    "；".join(product.issues) if product.issues else reason
-                )
+                message = "；".join(product.issues) if product.issues else reason
                 self.report(product.sku, status, message, 0)
                 results.append((product.sku, status))
                 continue
@@ -174,9 +182,7 @@ class BatchRunner:
                     except Cancelled:
                         raise
                     except Exception as recovery:
-                        raise ListingError(
-                            "驱动重连未完成：" + str(recovery)
-                        ) from exc
+                        raise ListingError("驱动重连未完成：" + str(recovery)) from exc
                     page.page = session.page
                     page.pending.clear()
                     page.last_plan = None
@@ -247,7 +253,7 @@ class BatchRunner:
                     page.ship_48h()
                     page.ensure_color_first()
                     prepare_color_sources(
-                        self.client, product, self.cancel, page.log
+                        self.client, product, self.cancel, page.log, cache=self.cache
                     )
                     _, colors = page.specs("颜色分类")
                     analysis = analyze(
@@ -256,6 +262,7 @@ class BatchRunner:
                         [r["name"] for r in colors],
                         self.cancel,
                         page.log,
+                        cache=self.cache,
                     )
                     for note in analysis.notes:
                         page.log(note)
@@ -296,9 +303,7 @@ class BatchRunner:
                     )
                     message = "草稿已保存"
                     if analysis.skipped_colors:
-                        message += "；跳过颜色：" + " / ".join(
-                            analysis.skipped_colors
-                        )
+                        message += "；跳过颜色：" + " / ".join(analysis.skipped_colors)
                     self.report(product.sku, "已保存", message, 100)
                     results.append((product.sku, "已保存"))
             except SaveUncertain as exc:
@@ -319,8 +324,7 @@ class BatchRunner:
                 disconnected = is_connection_failure(exc)
                 page.discard_pending(
                     str(exc),
-                    penalize=not disconnected
-                    and not isinstance(exc, Cancelled),
+                    penalize=not disconnected and not isinstance(exc, Cancelled),
                 )
                 if disconnected:
                     exc = ListingError(

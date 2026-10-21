@@ -29,7 +29,11 @@ def test_reference_is_in_initial_details_but_not_single_color_photos(tmp_path, s
     class ReferenceClient(Client):
         def generate(self, parts, schema):
             if "reference_ids" in schema.get("properties", {}):
-                return {"reference_ids": ["2"], "invalid_ids": []}
+                return {
+                    "reference_ids": ["2"],
+                    "size_chart_ids": ["3"],
+                    "invalid_ids": [],
+                }
             if "slots" in schema.get("properties", {}):
                 return {
                     "slots": [
