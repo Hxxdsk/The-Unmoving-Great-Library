@@ -538,12 +538,7 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
         def reconnect():
             try:
                 with FixtureSession(config, threading.Event()) as session:
-                    assert len(session.context.pages) >= 3
-                    assert any(
-                        p.locator("#sku").count()
-                        and p.locator("#sku").input_value() == product.sku
-                        for p in session.context.pages
-                    ), "重连应保留已保存的商品编辑页"
+                    assert session.page.url == "about:blank"
                     session.check_login()
                     assert "fixture-login=already-logged-in" in session.page.evaluate(
                         "document.cookie"
@@ -590,6 +585,7 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
         with local.open(f"http://127.0.0.1:{port}/json/list") as reply:
             targets = json.load(reply)
         assert any(t["url"] == "about:blank#ordinary-user-tab" for t in targets)
+        assert any("/ffa/g/edit?id=12345" in t["url"] for t in targets), "已保存页必须仍留在浏览器中"
         assert bridge.connected.is_set() and browser.poll() is None
     finally:
         activity_stop.set()

@@ -89,6 +89,8 @@ class BatchRunner:
             with runtime.session() as login:
                 login.next_work_page()
                 self.log(login.check_login())
+                if hasattr(runtime, "remember_login"):
+                    runtime.remember_login(login.page)
 
             def run_product(product):
                 worker = copy.copy(self)
@@ -306,6 +308,14 @@ class BatchRunner:
                         message += "；跳过颜色：" + " / ".join(analysis.skipped_colors)
                     self.report(product.sku, "已保存", message, 100)
                     results.append((product.sku, "已保存"))
+                    if hasattr(session, "park_saved_page"):
+                        try:
+                            session.park_saved_page()
+                        except Exception as exc:
+                            page.log(
+                                "草稿已保存；当前扩展暂未启用完成页节能，页面保留："
+                                + str(exc).splitlines()[0][:160]
+                            )
             except SaveUncertain as exc:
                 page.discard_pending(str(exc), penalize=False)
                 journal.update(

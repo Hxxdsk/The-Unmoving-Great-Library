@@ -140,10 +140,10 @@ class ListingWindow(QMainWindow):
         grid.setColumnStretch(3, 1)
         content.addLayout(grid)
         options = QHBoxLayout()
-        self.ai = QCheckBox("启用 AI 页面操作、配色与尺码识别")
+        self.ai = QCheckBox("启用 AI 识图与异常页面辅助")
         self.ai.setChecked(True)
         self.ai.setToolTip(
-            "页面控件难以定位时，使用主页 API / 模型识别当前工作页截图并辅助悬停、点击。"
+            "已确认的页面步骤优先使用流程记忆和当前控件；识别颜色、尺码体重或页面适配失效时才使用 AI。"
         )
         options.addWidget(self.ai)
         options.addStretch()

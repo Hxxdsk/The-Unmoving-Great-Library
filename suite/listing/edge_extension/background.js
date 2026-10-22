@@ -35,6 +35,40 @@ const noWindowFocus = `(() => {
 let workBounds = {};
 let workWindow = null, latestWorkTab = null, epoch = null, creating = 0, detaching = Promise.resolve();
 const owned = new Set(), attached = new Set(), children = new Map(), targets = new Map();
+const parked = new Set(), attachJobs = new Map(), wakeJobs = new Map();
+const browserClients = new Set(), cdpClients = new Map();
+let clientSequence = 0;
+let creationQueue = Promise.resolve();
+function create(...args) {
+  const job = creationQueue.then(() => createNow(...args));
+  creationQueue = job.catch(() => {});
+  return job;
+}
+async function wake(tabId) {
+  if (!parked.has(tabId)) return;
+  if (wakeJobs.has(tabId)) return wakeJobs.get(tabId);
+  const job = (async () => {
+    if (attached.has(tabId)) {
+      await chrome.debugger.sendCommand({tabId}, 'Page.setWebLifecycleState', {state:'active'});
+    } else {
+      await attach(tabId);
+      await chrome.debugger.sendCommand({tabId}, 'Page.setWebLifecycleState', {state:'active'});
+    }
+    await chrome.debugger.sendCommand({tabId}, 'Emulation.setFocusEmulationEnabled', {enabled:true}).catch(() => {});
+    parked.delete(tabId);
+    await chrome.tabs.update(tabId, {autoDiscardable:false}).catch(() => {});
+  })();
+  wakeJobs.set(tabId, job);
+  try { await job; } finally { wakeJobs.delete(tabId); }
+}
+async function park(tabId) {
+  if (parked.has(tabId)) return;
+  await chrome.debugger.sendCommand({tabId}, 'Emulation.setFocusEmulationEnabled', {enabled:false}).catch(() => {});
+  await chrome.debugger.sendCommand({tabId}, 'Page.setWebLifecycleState', {state:'frozen'});
+  parked.add(tabId);
+  await chrome.tabs.update(tabId, {autoDiscardable:true}).catch(() => {});
+}
+
 const tabForTarget = targetId => [...targets].find(([tabId, id]) => id === targetId)?.[0];
 async function remember(tab) {
   let target;
@@ -58,6 +92,13 @@ const info = tab => ({targetId: targets.get(tab.id), browserContextId: 'edge-def
   ...(owned.has(tab.openerTabId) ? {openerId: targets.get(tab.openerTabId)} : {})});
 
 async function attach(tabId) {
+  if (attached.has(tabId)) return;
+  if (attachJobs.has(tabId)) return attachJobs.get(tabId);
+  const job = attachNow(tabId);
+  attachJobs.set(tabId, job);
+  try { await job; } finally { attachJobs.delete(tabId); }
+}
+async function attachNow(tabId) {
   if (!owned.has(tabId)) throw new Error('禁止控制用户原有标签页');
   if (attached.has(tabId)) return;
   await chrome.debugger.attach({tabId}, '1.3');
@@ -66,12 +107,15 @@ async function attach(tabId) {
   // Remove any older session's forced viewport; use the native browser layout.
   await chrome.debugger.sendCommand({tabId}, 'Emulation.clearDeviceMetricsOverride').catch(() => {});
   await chrome.debugger.sendCommand({tabId}, 'Page.addScriptToEvaluateOnNewDocument', {source: noWindowFocus}).catch(() => {});
-  await chrome.debugger.sendCommand({tabId}, 'Runtime.evaluate', {expression: noWindowFocus}).catch(() => {});
-  await chrome.debugger.sendCommand({tabId}, 'Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
-  await chrome.debugger.sendCommand({tabId}, 'Page.setWebLifecycleState', {state: 'active'}).catch(() => {});
+  if (!parked.has(tabId)) {
+    await chrome.debugger.sendCommand({tabId}, 'Runtime.evaluate', {expression: noWindowFocus}).catch(() => {});
+    await chrome.debugger.sendCommand({tabId}, 'Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
+    await chrome.debugger.sendCommand({tabId}, 'Page.setWebLifecycleState', {state: 'active'}).catch(() => {});
+    await chrome.tabs.update(tabId, {autoDiscardable:false}).catch(() => {});
+  }
   event('Target.attachedToTarget', {sessionId: sid(tabId), targetInfo: info(await chrome.tabs.get(tabId)), waitingForDebugger: false});
 }
-async function create(url = 'about:blank', openerTabId = null) {
+async function createNow(url = 'about:blank', openerTabId = null) {
   if (!allowedUrl(url)) throw new Error('只允许新建抖店工作页');
   if (openerTabId != null && !owned.has(openerTabId)) throw new Error('只能从工具工作页打开子页');
   let tab;
@@ -101,43 +145,62 @@ async function create(url = 'about:blank', openerTabId = null) {
 async function disconnect() {
   autoAttach = discover = false;
   const tabs = [...attached];
-  attached.clear(); children.clear();
+  attached.clear(); children.clear(); browserClients.clear(); cdpClients.clear();
   await Promise.all(tabs.map(tabId => chrome.debugger.detach({tabId}).catch(() => {})));
   // Keep operation tabs and all ordinary tabs open; never close the browser.
 }
 async function command(message) {
   const {method, params = {}, sessionId} = message;
+  if (browserClients.has(sessionId)) {
+    if (method === 'Runtime.runIfWaitingForDebugger') return {};
+    if (method === 'Target.attachToTarget') {
+      const tabId = tabForTarget(params.targetId);
+      if (!owned.has(tabId)) throw new Error('只能操作工具工作页');
+      await attach(tabId);
+      const alias = `library-cdp-${++clientSequence}`;
+      cdpClients.set(alias, {tabId, parent:sessionId});
+      return {sessionId:alias};
+    }
+    return command({method, params});
+  }
   if (sessionId) {
-    const tabId = sessionId.startsWith('library-tab-') ? Number(sessionId.slice(12)) : children.get(sessionId);
+    const tabId = sessionId.startsWith('library-tab-') ? Number(sessionId.slice(12)) : (cdpClients.get(sessionId)?.tabId ?? children.get(sessionId));
     if (!owned.has(tabId) || !attached.has(tabId)) throw new Error('操作页已断开，请重新连接 Edge');
     const tab = await chrome.tabs.get(tabId);
     let url = tab.url || tab.pendingUrl;
     if (!url) url = (await chrome.debugger.getTargets()).find(t => t.tabId === tabId)?.url;
     if (!allowedUrl(url)) throw new Error('请在操作页完成抖店登录后重试');
     if (method === 'Page.navigate' && !allowedUrl(params.url)) throw new Error('禁止跳转到抖店以外的网站');
+    if (method === 'GreatLibrary.parkSavedPage') {await park(tabId); return {};}
+    if (method === 'Target.detachFromTarget' || (method === 'Runtime.runIfWaitingForDebugger' && cdpClients.has(sessionId))) return {};
+    if (parked.has(tabId)) await wake(tabId);
     if (method === 'Page.bringToFront') return {}; // Never steal focus from ordinary browsing.
-    const target = sessionId.startsWith('library-tab-') ? {tabId} : {tabId, sessionId};
+    const target = sessionId.startsWith('library-tab-') || cdpClients.has(sessionId) ? {tabId} : {tabId, sessionId};
     if (method === 'Page.enable' && !target.sessionId) {
       await chrome.debugger.sendCommand(target, 'Emulation.setFocusEmulationEnabled', {enabled: true}).catch(() => {});
     }
     return await chrome.debugger.sendCommand(target, method, params) || {};
   }
   switch (method) {
+    case 'Target.attachToBrowserTarget': {
+      const id = `library-browser-client-${++clientSequence}`;
+      browserClients.add(id); return {sessionId:id};
+    }
     case 'Browser.getVersion': return {protocolVersion: '1.3', product: 'Chrome/' + (navigator.userAgent.match(/(?:Chrome|Edg)\/([\d.]+)/)?.[1] || '130.0.0.0'), revision: '', userAgent: navigator.userAgent, jsVersion: ''};
     case 'Browser.setDownloadBehavior': return {};
     case 'Target.getBrowserContexts': return {browserContextIds: []};
     case 'Target.setDiscoverTargets':
       discover = params.discover;
-      if (discover) for (const id of owned) event('Target.targetCreated', {targetInfo: info(await chrome.tabs.get(id))});
+      if (discover) for (const id of owned) if (!parked.has(id)) event('Target.targetCreated', {targetInfo: info(await chrome.tabs.get(id))});
       return {};
     case 'Target.setAutoAttach':
       autoAttach = params.autoAttach;
       if (autoAttach) {
         if (!owned.size) await create('about:blank');
-        for (const id of owned) await attach(id);
+        for (const id of owned) if (!parked.has(id)) await attach(id);
       }
       return {};
-    case 'Target.getTargets': return {targetInfos: await Promise.all([...owned].map(async id => info(await chrome.tabs.get(id))))};
+    case 'Target.getTargets': return {targetInfos: await Promise.all([...owned].filter(id => !parked.has(id)).map(async id => info(await chrome.tabs.get(id))))};
     case 'Target.getTargetInfo': {
       if (!params.targetId) return {targetInfo: {targetId: 'library-browser', type: 'browser', title: '', url: '', attached: true}};
       const id = tabForTarget(params.targetId);
@@ -152,7 +215,15 @@ async function command(message) {
     case 'Target.attachToTarget': {
       const id = tabForTarget(params.targetId); await attach(id); return {sessionId: sid(id)};
     }
-    case 'Target.detachFromTarget': return {};
+    case 'Target.detachFromTarget': {
+      const client = cdpClients.get(params.sessionId);
+      if (client) {
+        cdpClients.delete(params.sessionId);
+        event('Target.detachedFromTarget', {sessionId:params.sessionId}, client.parent);
+      }
+      browserClients.delete(params.sessionId);
+      return {};
+    }
     case 'Target.closeTarget': {
       const id = tabForTarget(params.targetId);
       if (!owned.has(id)) throw new Error('禁止关闭用户原有标签页');
@@ -180,6 +251,12 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 chrome.tabs.onRemoved.addListener(tabId => {
   if (!owned.delete(tabId)) return;
+  parked.delete(tabId);
+  for (const [sessionId, owner] of children) if (owner === tabId) children.delete(sessionId);
+  for (const [sessionId, client] of cdpClients) if (client.tabId === tabId) {
+    cdpClients.delete(sessionId);
+    event('Target.detachedFromTarget', {sessionId}, client.parent);
+  }
   if (latestWorkTab === tabId) latestWorkTab = [...owned].at(-1) ?? null;
   if (attached.delete(tabId)) event('Target.detachedFromTarget', {sessionId: sid(tabId), targetId: targets.get(tabId)});
   event('Target.targetDestroyed', {targetId: targets.get(tabId)});
@@ -190,10 +267,12 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 });
 // Track popups opened by a tool tab, without attaching to unrelated user tabs.
 chrome.tabs.onCreated.addListener(tab => {
-  if (creating || (!owned.has(tab.openerTabId) && !(tab.windowId === workWindow && allowedUrl(tab.url || tab.pendingUrl)))) return;
-  owned.add(tab.id);
-  latestWorkTab = tab.id;
+  if (!owned.has(tab.openerTabId) && !(tab.windowId === workWindow && allowedUrl(tab.url || tab.pendingUrl))) return;
   (async () => {
+    if (creating) await creationQueue;
+    if (owned.has(tab.id)) return;
+    owned.add(tab.id);
+    latestWorkTab = tab.id;
     // Move only the owned child tab; never resize or focus the user's window.
     try {
       if (workWindow != null && tab.windowId !== workWindow) {
@@ -207,6 +286,10 @@ chrome.tabs.onCreated.addListener(tab => {
     if (discover) event('Target.targetCreated', {targetInfo: info(await chrome.tabs.get(tab.id))});
     if (autoAttach) await attach(tab.id);
   })().catch(error => console.warn('工作子页尚未就绪：', error.message));
+});
+// A saved tab is restored only when explicitly viewed; never activate a window.
+chrome.tabs.onActivated?.addListener(({tabId}) => {
+  if (owned.has(tabId)) wake(tabId).catch(error => console.warn('草稿页恢复失败：', error.message));
 });
 // Only after the user activates the work window, expand it for viewing.
 // Never combine maximized with focused:false or restore it in background code.

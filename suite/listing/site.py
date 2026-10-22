@@ -149,7 +149,9 @@ class DouyinPage:
     def memorized(self, goal, root=None, allow_save=False):
         if not self.memory:
             return None
-        for recipe in self.memory.recipes(goal, page_key(self.page), scope_key(root)):
+        for recipe in self.memory.recipes(goal, page_key(self.page), scope_key(root))[
+            :1
+        ]:
             if recipe.get("failures", 0) >= 3:
                 continue
             try:
@@ -173,7 +175,7 @@ class DouyinPage:
 
     def ai_context(self, goal):
         return {
-            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情上传整个颜色文件夹（包含多色对照图） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 使用颜色目录中尺码图识别已有尺码的右侧备注体重xx-xx斤，不再上传尺码图 → 价格399、现货1000 → 校验 → 返回顶部，选择商品标题AI推荐下拉框的第一个标题 → 保存草稿并确认成功 → 新开下一款并关闭旧页",
+            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情上传整个颜色文件夹（包含多色对照图） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 使用颜色目录中尺码图识别已有尺码的右侧备注体重xx-xx斤，不再上传尺码图 → 价格399、现货1000 → 校验 → 返回顶部，选择商品标题AI推荐下拉框的第一个标题 → 保存草稿并确认成功 → 保留已保存的编辑页，新开下一款；进入单商品后关闭闲置商品管理入口页",
             "当前阶段": self.phase,
             "本次目的": goal,
             "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
@@ -575,14 +577,7 @@ class DouyinPage:
             control = self.page.locator(item["selector"])
             if control.evaluate("e => !!e.files?.length"):
                 control.set_input_files([])
-        if "商品详情" in names and len(paths) > 1:
-            # A batch FileList preserves selection order, but merchant upload
-            # callbacks can append in completion order. Finish each image first.
-            for path in paths:
-                self.check()
-                self.upload(selector, (path,))
-        else:
-            self.upload(selector, paths)
+        self.upload(selector, paths)
         if self.photo_count(selector) != len(paths):
             raise ListingError("字段图片数量与当前货号资料不符。")
 
@@ -671,6 +666,10 @@ class DouyinPage:
         for candidate in candidates:
             if (
                 not candidate.is_closed()
+                and (
+                    not hasattr(self.session, "owns_work_page")
+                    or self.session.owns_work_page(candidate)
+                )
                 and "fxg.jinritemai.com" == urlparse(candidate.url).hostname
             ):
                 if candidate is not self.page:
@@ -730,7 +729,7 @@ class DouyinPage:
         # Reuse the proven recovery path before waiting for a failed fixed step.
         key, before = "流程：" + message, page_key(self.page)
         if not condition() and self.memory:
-            for recipe in self.memory.recipes(key, before):
+            for recipe in self.memory.recipes(key, before)[:1]:
                 if recipe.get("failures", 0) >= 3:
                     continue
                 try:
@@ -846,7 +845,7 @@ class DouyinPage:
         before, actions, history = page_key(self.page), [], []
         ready = lambda: self.creation_state() in ("upload", "titles", "editor")
         if self.memory:
-            for recipe in self.memory.recipes(goal, before):
+            for recipe in self.memory.recipes(goal, before)[:1]:
                 if recipe.get("failures", 0) >= 3:
                     continue
                 try:
@@ -1294,6 +1293,10 @@ class DouyinPage:
         try:
             self.reach_creation()
             state = self.creation_state()
+            if state in ("upload", "titles", "editor") and hasattr(
+                self.session, "release_entry_pages"
+            ):
+                self.session.release_entry_pages()
             if state == "upload":
                 self.upload_creation_main(product.main)
                 uploaded = True

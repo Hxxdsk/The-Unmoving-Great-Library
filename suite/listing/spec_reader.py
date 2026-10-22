@@ -101,6 +101,30 @@ def image_part(data):
     }
 
 
+def caption_fingerprint(page, row):
+    """Observe current caption content cheaply, including canvas repainting."""
+    return page.locator(row["control"]).evaluate(
+        """(e,{note})=>{
+          try {
+            const r=e.getBoundingClientRect(), s=getComputedStyle(e);
+            const n=document.querySelector(note).getBoundingClientRect();
+            const left=r.width>=60&&r.right>=n.left-30?r.left-4:n.left-180;
+            const inCaption=node=>{const b=node.getBoundingClientRect();return b.width>0&&b.height>0&&b.right>left&&b.left<n.left&&b.bottom>Math.min(n.y,r.y)-3&&b.top<Math.max(n.bottom,r.bottom)+3;};
+            // A transparent input may overlay a sibling canvas, so observe the
+            // same visible caption strip that capture_caption would render.
+            const canvas=[...document.querySelectorAll('canvas')].filter(inCaption);
+            const images=[...document.querySelectorAll('img')].filter(inCaption);
+            const input=[...(e.matches('input,select')?[e]:[]),...e.querySelectorAll('input,select')];
+            return JSON.stringify([e.textContent,e.getAttribute('aria-label'),input.map(n=>n.value),
+              canvas.map(n=>n.toDataURL()),images.map(n=>[n.currentSrc,n.complete,n.naturalWidth]),
+              r.width,r.height,s.font,s.color,s.backgroundColor,document.fonts?.status]);
+          } catch (_) {return null;}
+        }""",
+        {"note": row["note"]},
+        timeout=1200,
+    )
+
+
 def read_rows(page, label, client, cancel, log, cache=None, snapshot=None):
     snapshot = snapshot if snapshot is not None else page.evaluate(SCRIPT, label)
     rows = snapshot.get("rows", [])
@@ -110,18 +134,28 @@ def read_rows(page, label, client, cancel, log, cache=None, snapshot=None):
         )
         return snapshot.get("selector"), []
     cache = cache if cache is not None else {}
-    images, keys, digests = {}, {}, {}
+    images, keys, digests, fingerprints = {}, {}, {}, {}
     for index, row in enumerate(rows):
         if row["name"]:
             continue
         key = (label, row["note"], row["control"])
         keys[index] = key
         if client is not None or key in cache:
+            fingerprint = caption_fingerprint(page, row)
+            fingerprints[index] = fingerprint
+            saved = cache.get(key)
+            if (
+                saved
+                and fingerprint is not None
+                and saved.get("fingerprint") == fingerprint
+            ):
+                row["name"] = saved["name"]
+                continue
             data = capture_caption(page, row, cancel)
             images[index], digests[index] = data, hashlib.sha256(data).hexdigest()
-            saved = cache.get(key)
             if saved and saved["digest"] == digests[index]:
                 row["name"] = saved["name"]
+                saved["fingerprint"] = fingerprint
     pending = [i for i, row in enumerate(rows) if not row["name"]]
     if pending and client is None:
         return snapshot["selector"], []
@@ -181,7 +215,11 @@ def read_rows(page, label, client, cancel, log, cache=None, snapshot=None):
                     )
                 resolved[index] = name
             rows[index]["name"] = resolved[index]
-            cache[keys[index]] = {"name": resolved[index], "digest": digests[index]}
+            cache[keys[index]] = {
+                "name": resolved[index],
+                "digest": digests[index],
+                "fingerprint": fingerprints[index],
+            }
     if len({row["name"] for row in rows}) != len(rows):
         raise ListingError(f"{label}名称重复，请核对页面规格，未继续上传")
     return snapshot["selector"], rows

@@ -14,7 +14,7 @@ def is_connection_failure(exc):
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
         if re.search(
-            r"Connection closed|reading from the driver|browser has disconnected|Browser closed|Browser has been closed",
+            r"Connection closed|reading from the driver|browser has disconnected|Browser closed|Browser has been closed|Target crashed|Page crashed|Target page, context or browser has been closed",
             str(exc),
             re.I,
         ):
@@ -29,12 +29,60 @@ class EdgeSession:
     def __init__(self, config, cancel):
         self.config, self.cancel = config, cancel
         self.playwright = self.context = self.browser = self.page = None
+        self.entry_pages = set()
+        self.task_pages = set()
 
     def own_page(self, page):
         self.page = page
+        self.task_pages.add(page)
+
+    def owns_work_page(self, page):
+        seen = set()
+        current = page
+        while current is not None and current not in seen:
+            if current in self.task_pages:
+                self.task_pages.add(page)
+                return True
+            seen.add(current)
+            current = current.opener()
+        return False
+
+    @staticmethod
+    def is_entry_page(page):
+        if page.is_closed():
+            return False
+        parsed = urlparse(page.url)
+        return page.url == "about:blank" or (
+            parsed.hostname == "fxg.jinritemai.com"
+            and parsed.path.rstrip("/") == "/ffa/g/list"
+        )
+
+    def release_entry_pages(self):
+        # Only pages explicitly held by this session are candidates. Never close
+        # an editor, a still-loading child, or another task's management page.
+        for page in list(self.entry_pages):
+            if page is self.page:
+                continue
+            if self.is_entry_page(page):
+                page.close()
+            self.entry_pages.discard(page)
+
+    def park_saved_page(self):
+        # The extension freezes only confirmed saved pages; selecting the tab or
+        # sending another command wakes it. Ordinary Chromium tests may not
+        # support this extension command, so failure is purely an optimization.
+        cdp = self.context.new_cdp_session(self.page)
+        try:
+            cdp.send("GreatLibrary.parkSavedPage")
+        finally:
+            cdp.detach()
 
     def next_work_page(self):
+        if self.page is not None and self.is_entry_page(self.page):
+            self.entry_pages.add(self.page)
         self.page = self.context.new_page()
+        self.task_pages = {self.page}
+        self.entry_pages.add(self.page)
         return self.page
 
     def new_work_page(self):
@@ -63,6 +111,9 @@ class EdgeSession:
                 raise ListingError("没有可用的抖店操作页，请重新连接 Edge。")
             self.context = self.browser.contexts[0]
             self.context.set_default_timeout(12000)
+            self.entry_pages.update(
+                p for p in self.context.pages if self.is_entry_page(p)
+            )
             self.next_work_page()
             return self
         except Exception as exc:

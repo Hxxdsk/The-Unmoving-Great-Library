@@ -218,7 +218,7 @@ def test_explorer_punctuation_numeric_and_native_comparator(tmp_path, monkeypatc
     assert sorted(names, key=models.filename_key) == expected and seen
 
 
-def test_detail_upload_keeps_bang_zero_first_despite_slow_completion(tmp_path, session):
+def test_detail_upload_uses_one_batch_in_explorer_filename_order(tmp_path, session):
     make_product(tmp_path)
     folder = tmp_path / "货号A" / "详情"
     for path in folder.iterdir():
@@ -226,27 +226,20 @@ def test_detail_upload_keeps_bang_zero_first_despite_slow_completion(tmp_path, s
     for name in ["10.png", "!0.png", "2.png", "1.png"]:
         Image.new("RGB", (50, 50), "blue").save(folder / name)
     product = scan_products(tmp_path)[0]
-    assert [p.name for p in product.images["详情"]] == [
-        "!0.png",
-        "1.png",
-        "2.png",
-        "10.png",
-    ]
+    expected = ["!0.png", "1.png", "2.png", "10.png"]
+    assert [p.name for p in product.images["详情"]] == expected
     with session as s:
         s.check_login()
-        s.page.evaluate("""editor();window.fileSelections=[];
-        document.querySelector('#detail input[type=file]').onchange=e=>{
-          const files=[...e.target.files];fileSelections.push(files.map(f=>f.name));
-          for(const file of files)setTimeout(()=>picture(file.name,document.querySelector('#detail .photos')),file.name.startsWith('!')?180:5);
-        };void 0;""")
+        s.page.evaluate("editor()")
         page = DouyinPage(s, threading.Event())
         page.replace_images(("商品详情",), product.images["详情"])
-        assert s.page.locator("#detail img").evaluate_all(
-            "xs=>xs.map(x=>x.dataset.filename)"
-        ) == ["!0.png", "1.png", "2.png", "10.png"]
-        assert s.page.evaluate("fileSelections") == [
-            ["!0.png"],
-            ["1.png"],
-            ["2.png"],
-            ["10.png"],
-        ]
+        assert (
+            s.page.locator("#detail img").evaluate_all(
+                "xs=>xs.map(x=>x.dataset.filename)"
+            )
+            == expected
+        )
+        uploads = s.page.evaluate(
+            "audit.filter(e=>e.event==='upload'&&e.field==='detail')"
+        )
+        assert [item["files"] for item in uploads] == [expected]

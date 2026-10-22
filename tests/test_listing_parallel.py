@@ -256,6 +256,7 @@ def test_parallel_through_extension_relay_preserves_drafts(tmp_path, monkeypatch
         assert sorted(inspected) == [('A', 1), ('B', 1)], logs
         assert all(r['details'] == [r['sku'] + '-1.png', r['sku'] + '-2.png'] for r in saved_records)
         assert not any('跳过图片字段' in message for message in logs), logs
+        assert not any('未启用完成页节能' in message for message in logs), logs
         assert browser.poll() is None and bridge.connected.is_set()
         with connect(endpoint, proxy=None) as socket:
             socket.send(json.dumps({'id': 1, 'method': 'Target.getTargets'}))
@@ -265,6 +266,7 @@ def test_parallel_through_extension_relay_preserves_drafts(tmp_path, monkeypatch
                     targets = reply['result']['targetInfos']
                     break
         assert any(t['url'] == 'about:blank#ordinary-user-tab' for t in targets)
+        assert not any(t['url'].startswith('https://fxg.jinritemai.com/ffa/g/list') for t in targets)
         assert sum(t['url'] in page_urls for t in targets) == 2
     finally:
         bridge.close()

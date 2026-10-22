@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .models import ListingError
+from .models import ListingError, Cancelled
 from .page_ai import FORBIDDEN
 
 DESCRIBE = r"""e => {
@@ -43,7 +43,8 @@ def scope_key(root):
     # Labels only: do not retain current SKU, filenames, input contents or prices.
     return (
         root.evaluate(
-            "e=>[...e.querySelectorAll('label,h1,h2,h3,h4')].map(x=>x.innerText.trim()).filter(Boolean).slice(0,4).join('/')"
+            "e=>[...e.querySelectorAll('label,h1,h2,h3,h4')].map(x=>x.innerText.trim()).filter(Boolean).slice(0,4).join('/')",
+            timeout=1000,
         )[:120]
         or "field"
     )
@@ -51,7 +52,8 @@ def scope_key(root):
 
 def safe_target(target, allow_save=False):
     actual = target.evaluate(
-        "e=>{const p=e.closest('button,a,[role=button],[role=menuitem]')||e;return [p.innerText,p.getAttribute('aria-label'),p.title].filter(Boolean).join(' ')}"
+        "e=>{const p=e.closest('button,a,[role=button],[role=menuitem]')||e;return [p.innerText,p.getAttribute('aria-label'),p.title].filter(Boolean).join(' ')}",
+        timeout=1000,
     )
     actual = re.sub(r"\s+", "", actual)
     if FORBIDDEN.search(actual) or ("保存草稿" in actual and not allow_save):
@@ -83,37 +85,44 @@ def resolve(page, descriptor, root=None, allow_save=False):
         attrs, dict
     ):
         return None
-    choices = []
-    for attr in ("data-testid", "data-test-id", "id", "aria-label", "name", "title"):
-        value = attrs.get(attr)
-        if isinstance(value, str) and value:
-            choices.append(
-                scope.locator(tag + "[" + attr + "=" + json.dumps(value) + "]")
+
+    def choices():
+        for attr in (
+            "data-testid",
+            "data-test-id",
+            "id",
+            "aria-label",
+            "name",
+            "title",
+        ):
+            value = attrs.get(attr)
+            if isinstance(value, str) and value:
+                yield scope.locator(tag + "[" + attr + "=" + json.dumps(value) + "]")
+        if text:
+            yield scope.get_by_text(text, exact=True)
+            # Inspect all tags only if stable attributes/exact text have failed.
+            labels = scope.locator(tag).evaluate_all(
+                "nodes=>nodes.map((e,i)=>({i,text:(e.innerText||'').trim(),visible:!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'}))"
             )
-    if text:
-        choices.append(scope.get_by_text(text, exact=True))
-        # Match known equivalent labels despite arrows/spacing or a new DOM path.
-        labels = scope.locator(tag).evaluate_all(
-            "nodes=>nodes.map((e,i)=>({i,text:(e.innerText||'').trim(),visible:!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'}))"
-        )
-        equivalent = [
-            row["i"]
-            for row in labels
-            if row["visible"] and semantic_text(row["text"]) == semantic_text(text)
-        ]
-        if len(equivalent) == 1:
-            choices.append(scope.locator(tag).nth(equivalent[0]))
-    css = descriptor.get("css", "")
-    if re.fullmatch(r"[a-z0-9:()>\-\s]+", css or ""):
-        choices.append(scope.locator(css))
-    for query in choices:
+            equivalent = [
+                r["i"]
+                for r in labels
+                if r["visible"] and semantic_text(r["text"]) == semantic_text(text)
+            ]
+            if len(equivalent) == 1:
+                yield scope.locator(tag).nth(equivalent[0])
+        css = descriptor.get("css", "")
+        if re.fullmatch(r"[a-z0-9:()>\-\s]+", css or ""):
+            yield scope.locator(css)
+
+    for query in choices():
         visible = [
             query.nth(i) for i in range(query.count()) if query.nth(i).is_visible()
         ]
         if len(visible) != 1:
             continue
         target = visible[0]
-        current = target.evaluate(DESCRIBE)
+        current = target.evaluate(DESCRIBE, timeout=1000)
         # Never replay an old position when its button has changed meaning.
         matches = (
             semantic_text(current["text"]) == semantic_text(text)
@@ -301,16 +310,28 @@ class WorkflowStore:
 
 
 def replay(
-    page, actions, root=None, allow_save=False, cancel=None, observe=None, done=None
+    page,
+    actions,
+    root=None,
+    allow_save=False,
+    cancel=None,
+    observe=None,
+    done=None,
+    budget=4,
 ):
     """Replay a verified recipe; callers must check its expected page result."""
+    if not isinstance(actions, list) or len(actions) > 16:
+        return None
+    deadline = time.monotonic() + budget
     for index, action in enumerate(actions):
+        if time.monotonic() >= deadline:
+            return None
         if done and done():
             return True
         if observe:
             page = observe() or page
         if cancel and cancel.is_set():
-            raise ListingError("已停止流程回放")
+            raise Cancelled("已停止流程回放")
         kind = action.get("kind")
         if kind == "scroll":
             page.mouse.wheel(0, max(-700, min(700, int(action.get("dy", 0)))))
@@ -331,11 +352,12 @@ def replay(
             return None
         if kind == "target":
             return target
+        remaining = max(1, min(1200, int((deadline - time.monotonic()) * 1000)))
         if kind == "hover":
-            target.hover(timeout=4000)
+            target.hover(timeout=remaining)
             page.wait_for_timeout(150)
         elif kind == "click":
-            target.click(timeout=5000)
+            target.click(timeout=remaining)
         else:
             return None
     return True
