@@ -74,6 +74,7 @@ def test_reference_is_in_initial_details_but_not_single_color_photos(tmp_path, s
         ReferenceClient(),
         threading.Event(),
         session_factory=lambda *_: session,
+        upload_colors=True,
     ).run()
     assert result == [(product.sku, "已保存")]
     generation = next(e for e in session.audit if e["event"] == "generation")

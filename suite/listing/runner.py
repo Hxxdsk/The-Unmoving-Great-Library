@@ -10,7 +10,7 @@ from pathlib import Path
 from .models import Journal, ListingError, Cancelled, SaveUncertain
 from .browser import EdgeSession, is_connection_failure
 from .site import DouyinPage
-from .vision import analyze, prepare_color_sources
+from .vision import analyze, prepare_color_sources, prepare_size_sources
 from suite.cache import ResultCache
 
 
@@ -59,11 +59,13 @@ class BatchRunner:
         guide=None,
         concurrency=1,
         all_parallel=False,
+        upload_colors=False,
     ):
         self.root, self.products, self.browser = Path(root), products, browser
         self.memory, self.guide = memory, guide
         self.concurrency = max(1, int(concurrency))
         self.all_parallel = all_parallel
+        self.upload_colors = upload_colors
         self.cache = ResultCache("listing-vision-v2", self.root / "_抖店识别缓存")
         self.client, self.cancel = client, cancel
         self.price, self.inventory = price, inventory
@@ -162,6 +164,7 @@ class BatchRunner:
                 guide=self.guide,
             )
 
+            page.upload_color_images = self.upload_colors
             driver_recoveries = 0
 
             def replace_field(names, paths):
@@ -251,13 +254,33 @@ class BatchRunner:
                         page.log(f"跳过水洗标图片：{exc}")
                         page.dismiss_optional_dialogs()
                     sku_control = page.fill_sku(product.sku)
-                    advance("识别颜色正面图、尺码与体重", 50)
-                    page.ship_48h()
-                    page.ensure_color_first()
-                    prepare_color_sources(
-                        self.client, product, self.cancel, page.log, cache=self.cache
+                    advance(
+                        "识别颜色与尺码" if self.upload_colors else "仅识别尺码与体重",
+                        50,
                     )
-                    _, colors = page.specs("颜色分类")
+                    page.ship_48h()
+                    colors = []
+                    if self.upload_colors:
+                        page.ensure_color_first()
+                        prepare_color_sources(
+                            self.client,
+                            product,
+                            self.cancel,
+                            page.log,
+                            cache=self.cache,
+                        )
+                        _, colors = page.specs("颜色分类")
+                    else:
+                        page.log(
+                            "颜色图未勾选：不识别颜色、不上传颜色图，保留网页颜色原状态"
+                        )
+                        prepare_size_sources(
+                            self.client,
+                            product,
+                            self.cancel,
+                            page.log,
+                            cache=self.cache,
+                        )
                     analysis = analyze(
                         self.client,
                         product,
@@ -265,11 +288,13 @@ class BatchRunner:
                         self.cancel,
                         page.log,
                         cache=self.cache,
+                        upload_colors=self.upload_colors,
                     )
                     for note in analysis.notes:
                         page.log(note)
-                    advance("按页面顺序上传颜色规格图", 60)
-                    page.set_color_photos(analysis)
+                    if self.upload_colors:
+                        advance("按页面顺序上传颜色规格图", 60)
+                        page.set_color_photos(analysis)
                     advance("填写尺码与体重备注", 70)
                     page.set_sizes(analysis.sizes)
                     advance("批量价格与现货库存", 86)

@@ -54,7 +54,7 @@ class Client:
 
     def generate(self, parts, schema):
         self.calls += 1
-        if "reference_ids" in schema.get("properties", {}):
+        if "size_chart_ids" in schema.get("properties", {}):
             return {
                 "reference_ids": [],
                 "size_chart_ids": [
@@ -318,6 +318,11 @@ def test_listing_interface_has_expected_defaults(tmp_path):
     assert window.table.rowCount() == 1 and window.selected()[0].sku == product.sku
     assert window.start.text() == "开始保存草稿"
     assert window.login.text() == "连接 Edge"
+    assert not window.upload_colors.isChecked()
+    window.busy(True)
+    assert not window.upload_colors.isEnabled()
+    window.busy(False)
+    assert window.upload_colors.isEnabled()
     assert not hasattr(window, "user_data") and not hasattr(window, "advanced")
     window.close()
     window.deleteLater()
@@ -585,7 +590,9 @@ def test_edge_extension_relay_full_draft_and_reconnect(tmp_path, background_popu
         with local.open(f"http://127.0.0.1:{port}/json/list") as reply:
             targets = json.load(reply)
         assert any(t["url"] == "about:blank#ordinary-user-tab" for t in targets)
-        assert any("/ffa/g/edit?id=12345" in t["url"] for t in targets), "已保存页必须仍留在浏览器中"
+        assert any(
+            "/ffa/g/edit?id=12345" in t["url"] for t in targets
+        ), "已保存页必须仍留在浏览器中"
         assert bridge.connected.is_set() and browser.poll() is None
     finally:
         activity_stop.set()
@@ -635,7 +642,7 @@ def test_page_ai_hovers_then_clicks_a_renamed_menu(session):
         assert s.page.evaluate("window.picked") is True
         assert len(client.calls) == 2
         assert all(
-            parts[1]["inlineData"]["mimeType"] == "image/jpeg"
+            len(parts) == 1 and "inlineData" not in parts[0]
             for parts, _ in client.calls
         )
         assert "独立商品" not in [c["text"] for c in client.calls[0][1]]

@@ -143,9 +143,15 @@ class ListingWindow(QMainWindow):
         self.ai = QCheckBox("启用 AI 识图与异常页面辅助")
         self.ai.setChecked(True)
         self.ai.setToolTip(
-            "已确认的页面步骤优先使用流程记忆和当前控件；识别颜色、尺码体重或页面适配失效时才使用 AI。"
+            "先扫描整页控件并按字段顺序填写；仅识图和异常 DOM 分析使用 AI，不再逐屏截图定位。"
         )
         options.addWidget(self.ai)
+        self.upload_colors = QCheckBox("识别并上传颜色图")
+        self.upload_colors.setChecked(False)
+        self.upload_colors.setToolTip(
+            "默认关闭；勾选后才上传颜色目录、识别颜色和替换颜色规格图。尺码体重识别照常进行。"
+        )
+        options.addWidget(self.upload_colors)
         options.addStretch()
         options.addWidget(QLabel("售价"))
         self.price = QDoubleSpinBox()
@@ -450,6 +456,7 @@ class ListingWindow(QMainWindow):
             self.concurrency,
             self.all_parallel,
             self.ai,
+            self.upload_colors,
             self.workflow_profile,
             self.profile_new,
             self.profile_edit,
@@ -468,7 +475,7 @@ class ListingWindow(QMainWindow):
             self.error("请勾选待处理货号。")
             return
         if not self.ai.isChecked():
-            self.error("此工具需要 AI 识别颜色与尺码，请开启 AI。")
+            self.error("此工具需要 AI 识别尺码与体重，请开启 AI。")
             return
         try:
             client = shared_client(vision_fallback=True)
@@ -485,6 +492,7 @@ class ListingWindow(QMainWindow):
         stock = self.inventory.value()
         concurrency = self.concurrency.value()
         all_parallel = self.all_parallel.isChecked()
+        upload_colors = self.upload_colors.isChecked()
 
         def run(cancel, report, log):
             client.cancel = cancel
@@ -502,6 +510,7 @@ class ListingWindow(QMainWindow):
                 memory=memory,
                 concurrency=concurrency,
                 all_parallel=all_parallel,
+                upload_colors=upload_colors,
             ).run()
 
         self.worker = Worker(run, self)

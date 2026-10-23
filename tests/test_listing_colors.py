@@ -26,6 +26,7 @@ def test_details_replaced_before_generation_and_main_retained(tmp_path, session)
     product = make_product(tmp_path)
     with session as s:
         page = DouyinPage(s, threading.Event())
+        page.upload_color_images = True
         page.create(product)
         audit = s.page.evaluate("window.audit")
         generation = next(e for e in audit if e["event"] == "generation")

@@ -30,6 +30,7 @@ class DouyinPage:
         )
         self.editor_url = ""
         self.details_prepared = False
+        self.upload_color_images = False
         self.batch_applied = False
         self.generation_pending = False
         self.spec_cache = {}
@@ -96,12 +97,75 @@ class DouyinPage:
                 scope.get_by_text(re.compile(re.escape(text))),
             ]
         for query in queries:
-            visible = [
-                query.nth(i) for i in range(query.count()) if query.nth(i).is_visible()
-            ]
+            visible = query.evaluate_all("""nodes=>nodes.flatMap((e,i)=>{
+                const r=e.getBoundingClientRect(),s=getComputedStyle(e);
+                return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&s.visibility!=='collapse'?[i]:[];
+            })""")
             if len(visible) == 1:
-                return visible[0]
+                return query.nth(visible[0])
         return None
+
+    def element_control(self, text, root=None):
+        """Resolve live elements across the document, including offscreen fields."""
+        target = self.visible_control(text, root)
+        if target is not None or not isinstance(text, str):
+            return target
+        scope = root or self.page
+        input_goal = re.search(r"定位(商品标题|货号)输入框", text)
+        if input_goal:
+            label = "标题" if input_goal[1] == "商品标题" else "货号"
+            queries = [
+                scope.get_by_label(re.compile(label)),
+                scope.get_by_placeholder(re.compile(label)),
+            ]
+            section = self.dom("section", input_goal[1])
+            if section:
+                queries.append(
+                    self.page.locator(section).locator(
+                        "input:not([type=hidden]),textarea"
+                    )
+                )
+            elif root is not None:
+                queries.append(root.locator("input:not([type=hidden]),textarea"))
+            for query in queries:
+                candidates = [
+                    e for e in query.all() if e.is_visible() and e.is_editable()
+                ]
+                if len(candidates) == 1:
+                    return candidates[0]
+        elif "本地上传入口" in text:
+            return self.visible_control(re.compile(r"^(本地上传|从本地上传)$"), root)
+        elif "上传图片入口" in text:
+            return self.visible_control(
+                re.compile(r"^(上传图片|上传主图|上传辅助图|图片|本地上传)$"), root
+            )
+        elif "当前弹窗确认" in text and "按钮：" in text:
+            names = text.split("按钮：", 1)[1].split("/")
+            return self.visible_control(
+                re.compile("^(?:" + "|".join(map(re.escape, names)) + ")$"), root
+            )
+        return None
+
+    def set_input_value(self, target, value):
+        """Write controlled inputs with native events; no viewport movement."""
+        self.check()
+        value = str(value)
+        target.evaluate(
+            """(e,value)=>{
+              if(!e.isConnected||!e.matches('input:not([type=file]):not([type=hidden]),textarea')||e.disabled||e.readOnly||e.closest('[inert]'))
+                throw new Error('字段不是可填写的输入框');
+              const proto=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+              Object.getOwnPropertyDescriptor(proto,'value').set.call(e,value);
+              e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));
+              e.dispatchEvent(new Event('change',{bubbles:true}));
+              e.dispatchEvent(new FocusEvent('blur',{bubbles:true}));
+              e.dispatchEvent(new FocusEvent('focusout',{bubbles:true}));
+            }""",
+            value,
+            timeout=2000,
+        )
+        if target.input_value(timeout=2000) != value:
+            raise ListingError("字段写入后未保留预期值，已停止当前步骤")
 
     def memory_failed(self, recipe):
         if self.memory:
@@ -175,7 +239,12 @@ class DouyinPage:
 
     def ai_context(self, goal):
         return {
-            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情上传整个颜色文件夹（包含多色对照图） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 按网站颜色与多色对照图匹配单色图到右侧图片框 → 使用颜色目录中尺码图识别已有尺码的右侧备注体重xx-xx斤，不再上传尺码图 → 价格399、现货1000 → 校验 → 返回顶部，选择商品标题AI推荐下拉框的第一个标题 → 保存草稿并确认成功 → 保留已保存的编辑页，新开下一款；进入单商品后关闭闲置商品管理入口页",
+            "颜色图": (
+                "勾选启用"
+                if self.upload_color_images
+                else "关闭：不识别、不上传颜色图，生成前使用详情目录图片"
+            ),
+            "完整流程": "每款新开工作页 → 单商品入口（可能新开标签） → 本地上传800前5张 → 生成前详情使用详情目录（仅勾选颜色图时使用整个颜色目录） → 填用户标题，不选推荐 → 继续生成编辑页 → 从上往下替换3:4、白底、全部详情、水洗标 → 当前货号 → 48小时 → 仅勾选颜色图时按网站颜色匹配单色图 → 使用颜色目录中尺码图识别已有尺码的右侧备注体重xx-xx斤，不再上传尺码图 → 价格399、现货1000 → 校验 → 返回顶部，选择商品标题AI推荐下拉框的第一个标题 → 保存草稿并确认成功 → 保留已保存的编辑页，新开下一款；进入单商品后关闭闲置商品管理入口页",
             "当前阶段": self.phase,
             "本次目的": goal,
             "操作原则": "根据实际页面决定入口；名字可以不同。菜单已展开就选子项，不反复寻找或点击上级按钮。悬停出现的弹层也属于当前页面。不得发布或改动其他商品。",
@@ -191,12 +260,14 @@ class DouyinPage:
         self.check()
         goal = text if isinstance(text, str) else text.pattern
         before, scope = page_key(self.page), scope_key(root)
-        recalled = self.memorized(goal, root, allow_save)
+        # Inspect the current document before replaying old hover/scroll steps.
+        live = self.element_control(text, root)
+        recalled = self.memorized(goal, root, allow_save) if live is None else None
         source, actions, recipe = "程序", [], None
         if recalled:
             target, actions, source, recipe = recalled
         else:
-            target = self.visible_control(text, root)
+            target = live
             if target is None:
                 source = "AI"
                 try:
@@ -265,9 +336,16 @@ class DouyinPage:
         if FORBIDDEN.search(re.sub(r"\s+", "", actual)):
             raise ListingError("工具只保存草稿，禁止点击发布。")
         self.record_action(target)
-        target.click(timeout=8000)
+        self.click_field(target)
 
     def tab(self, text):
+        # Anchor navigation on a long editor can needlessly jump the viewport.
+        # Open a tab only when its form region isn't already rendered.
+        sections = {"图文信息": "主图3:4", "属性信息": "货号"}
+        if text in sections and self.dom("section", sections[text]):
+            return
+        if text == "价格库存" and self.dom("batch_price_stock"):
+            return
         self.click(text)
 
     def activate_creation_control(self, target, pattern, token="", arm=False):
@@ -365,7 +443,6 @@ class DouyinPage:
         for name in names:
             selector = self.dom("section", name)
             if selector:
-                self.page.locator(selector).scroll_into_view_if_needed()
                 return selector
         if self.client is not None or self.guide:
             target = self.control(
@@ -377,7 +454,6 @@ class DouyinPage:
             selector = self.dom("section_from", names[0], leaf)
             if selector:
                 self.record_action(target)
-                self.page.locator(selector).scroll_into_view_if_needed()
                 return selector
         raise ListingError("页面未识别到字段：" + "/".join(names))
 
@@ -844,7 +920,13 @@ class DouyinPage:
         goal = "流程：打开单商品创建页"
         before, actions, history = page_key(self.page), [], []
         ready = lambda: self.creation_state() in ("upload", "titles", "editor")
-        if self.memory:
+        memory_attempted = False
+
+        def recover_memory():
+            nonlocal memory_attempted
+            if memory_attempted or not self.memory:
+                return False
+            memory_attempted = True
             for recipe in self.memory.recipes(goal, before)[:1]:
                 if recipe.get("failures", 0) >= 3:
                     continue
@@ -859,12 +941,14 @@ class DouyinPage:
                     self.page.wait_for_timeout(400)
                     if ready():
                         self.log("已按记忆恢复流程：打开单商品创建页")
-                        return
+                        return True
                 except Cancelled:
                     raise
                 except Exception as exc:
                     history.append("旧记忆需按当前页面调整：" + str(exc)[:120])
                 self.memory_failed(recipe)
+            return False
+
         attempted, ai_calls, human_steps = set(), 0, 0
         transient_failures = {}
         entry_submitted_at = None
@@ -1038,6 +1122,8 @@ class DouyinPage:
                     self.page.wait_for_timeout(400)
                     history.append({"action": kind, "text": descriptor["text"]})
                     continue
+            if recover_memory():
+                return
             error = "当前页面尚未进入创建流程"
             if self.client is not None and ai_calls < 10:
                 ai_calls += 1
@@ -1312,12 +1398,15 @@ class DouyinPage:
                 )
             state = self.creation_state()
             if state == "titles":
-                self.phase = "生成前上传整个颜色文件夹（含多色对照图），填写用户标题"
-                if product.images.get("颜色"):
-                    self.replace_images(("商品详情",), product.images["颜色"])
+                self.phase = "生成前上传详情，填写用户标题"
+                source = product.images.get(
+                    "颜色" if self.upload_color_images else "详情", ()
+                )
+                if source:
+                    self.replace_images(("商品详情",), source)
                 self.wait(
                     lambda: not self.dom("busy", selector=self.section("商品详情")),
-                    "颜色图片尚未上传完成",
+                    "生成前详情图片尚未上传完成",
                     timeout=90,
                 )
                 title = self.page.get_by_placeholder(re.compile(r"标题|2.60|1.30"))
@@ -1340,8 +1429,8 @@ class DouyinPage:
                         ]
                         current = editable[0] if len(editable) == 1 else title
                         if current.input_value(timeout=1000) != product.title.strip():
-                            current.fill(product.title.strip(), timeout=1000)
-                            current.press("Tab", timeout=1000)
+                            self.set_input_value(current, product.title.strip())
+                            current.dispatch_event("blur", timeout=1000)
                         if self.creation_state() == "editor":
                             return True
                         return (
@@ -1478,7 +1567,7 @@ class DouyinPage:
             self.record_action(target)
         if require_same and self.page.locator(control).input_value() not in ("", sku):
             raise ListingError("恢复页面已有不同货号，禁止覆盖，请核对任务记录。")
-        self.page.locator(control).fill(sku)
+        self.set_input_value(self.page.locator(control), sku)
         if self.page.locator(control).input_value() != sku:
             raise ListingError("货号写入未确认。")
         return control
@@ -1608,7 +1697,11 @@ class DouyinPage:
             self.log(f"跳过体重备注 {name}：网页尺码区域没有该项")
         for name in existing - desired.keys():
             self.log(f"保留网页尺码 {name}：图片无对应数据，不修改备注")
-        desired = {name: weight for name, weight in desired.items() if name in existing}
+        desired = {
+            normalize_size(row["name"]): desired[normalize_size(row["name"])]
+            for row in records
+            if normalize_size(row["name"]) in desired
+        }
         for name, weight in desired.items():
             # Re-read after every write: controlled inputs may rebuild the row.
             _, current = self.specs("尺码大小", allow_empty=True)
@@ -1845,17 +1938,17 @@ class DouyinPage:
                 }
             except (ValueError, TypeError, KeyError):
                 pass
-        price_input.fill(str(price))
+        self.set_input_value(price_input, price)
         if mode and len(amounts) == 1:
             current = next(iter(amounts))
             delta = inventory - current
             if delta:
                 self.click("增" if delta > 0 else "减", self.page.locator(mode))
-                stock_input.fill(str(int(abs(delta))))
+                self.set_input_value(stock_input, int(abs(delta)))
             else:
-                stock_input.fill("")
+                self.set_input_value(stock_input, "")
         else:
-            stock_input.fill(str(inventory))
+            self.set_input_value(stock_input, inventory)
         price_input.blur()
         stock_input.blur()
         self.wait(
@@ -1880,7 +1973,7 @@ class DouyinPage:
         ):
             raise ListingError("最终货号校验失败，禁止保存，避免串款。")
         self.tab("价格库存")
-        _, colors = self.specs("颜色分类")
+        colors = self.specs("颜色分类")[1] if analysis.colors else []
         matched = {r["name"]: r for r in colors}
         if not set(analysis.colors).issubset(matched) or any(
             matched[name]["photos"] != 1 for name in analysis.colors

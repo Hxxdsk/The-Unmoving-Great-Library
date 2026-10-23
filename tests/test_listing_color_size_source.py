@@ -30,6 +30,7 @@ def test_full_draft_never_reopens_size_chart_upload(tmp_path, session):
             Client(),
             threading.Event(),
             session_factory=lambda *_: session,
+            upload_colors=True,
         ).run()
     assert result == [(product.sku, "已保存")]
     generation = next(e for e in session.audit if e["event"] == "generation")

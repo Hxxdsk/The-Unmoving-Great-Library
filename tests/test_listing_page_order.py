@@ -105,6 +105,7 @@ def test_workflow_fills_panels_and_specs_from_top_to_bottom(
             Client(),
             threading.Event(),
             session_factory=lambda *_: nullcontext(s),
+            upload_colors=True,
         ).run()
         assert result == [(product.sku, "已保存")]
         fields = [

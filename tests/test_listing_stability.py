@@ -96,9 +96,7 @@ def test_memory_recovers_locally_without_screenshot_or_ai(
         assert s.page.evaluate("window.done")
 
 
-def test_stale_hover_memory_times_out_then_uses_live_control(
-    tmp_path, session, monkeypatch
-):
+def test_live_dom_precedes_stale_hover_memory(tmp_path, session, monkeypatch):
     with session as s:
         s.check_login()
         s.page.set_content(
@@ -126,7 +124,7 @@ def test_stale_hover_memory_times_out_then_uses_live_control(
         page.click("图文信息")
         assert time.monotonic() - started < 3
         assert s.page.evaluate("window.done")
-        assert not store.recipes("图文信息", page_key(s.page))
+        assert store.recipes("图文信息", page_key(s.page))[0].get("failures", 0) == 0
 
 
 def test_unbounded_memory_and_exhausted_budget_never_click(session):

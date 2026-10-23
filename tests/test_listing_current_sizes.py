@@ -103,6 +103,7 @@ def test_content_size_chart_is_excluded_and_ai_invalids_do_not_drop_garments(
     assert chart not in product.color_photos
     with session as s:
         page = DouyinPage(s, threading.Event())
+        page.upload_color_images = True
         page.create(product)
         generation = next(
             e for e in s.page.evaluate("audit") if e["event"] == "generation"

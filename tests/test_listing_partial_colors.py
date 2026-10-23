@@ -59,6 +59,7 @@ def test_missing_color_images_still_save_and_size_weights_match_each_row(
         TableClient(),
         threading.Event(),
         session_factory=lambda *_: session,
+        upload_colors=True,
     ).run()
     assert results == [(product.sku, "已保存")]
     saved = next(e for e in session.audit if e["event"] == "save")
