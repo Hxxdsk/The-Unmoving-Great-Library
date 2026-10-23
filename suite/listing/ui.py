@@ -545,18 +545,13 @@ class ListingWindow(QMainWindow):
             return
         try:
             config = self.bridge.start()
-            if not self.bridge.connected.is_set() and (
-                not self.bridge.pairing.data.get("paired")
-                or self.bridge.pairing.removed()
-            ):
+            if not self.bridge.connected.is_set():
                 self.bridge.open_edge()
             self.save_preferences()
         except Exception as exc:
             self.error(str(exc))
             return
-        self.log.appendPlainText(
-            "首次配对请完成连接页操作；已配对时自动等待 Edge 上线，无需重复连接。"
-        )
+        self.log.appendPlainText("连接页已打开时会重新配对；已连接时沿用现有通道。")
 
         def run(cancel, *_):
             import time
@@ -567,7 +562,7 @@ class ListingWindow(QMainWindow):
                     return "已取消连接，Edge 窗口保留。"
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
-                        "Edge 扩展暂未上线，配对记录保留，后台会继续自动等待。请确认已打开原 Edge 用户配置，扩展已启用。首次使用请按连接页说明安装扩展。"
+                        "Edge 扩展暂未上线，配对记录保留。请在 edge://extensions 启用或重新加载连接扩展，然后刷新连接页或再次点击连接 Edge。"
                     )
             with EdgeSession(config, cancel) as session:
                 return session.open_login()

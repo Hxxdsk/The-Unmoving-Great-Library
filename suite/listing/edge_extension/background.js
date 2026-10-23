@@ -309,7 +309,7 @@ chrome.windows.onFocusChanged.addListener(windowId => {
   })().catch(error => console.warn('工作窗口查看状态未调整：', error.message));
 });
 // Remember the capability locally; retries never create tabs or steal focus.
-let connecting = null, reconnectTimer = null;
+let connecting = null, connectingAddress = null, reconnectTimer = null;
 const PAIR_KEY = 'greatLibraryPairing';
 function validPair(pair) {
   return pair && Number.isInteger(pair.port) && pair.port > 0 && pair.port < 65536 && /^[a-f0-9]{64}$/.test(pair.token);
@@ -322,9 +322,16 @@ async function connectPair(pair) {
   if (!validPair(pair)) throw new Error('配对记录无效，请首次连接 Edge');
   const address = `ws://127.0.0.1:${pair.port}/extension/${pair.token}`;
   if (socket?.readyState === WebSocket.OPEN && socket.url === address) return;
-  if (connecting) return connecting;
-  connecting = (async () => {
+  if (connecting) {
+    if (connectingAddress === address) return connecting;
+    // A newly opened pairing page may replace an old saved endpoint.
+    await connecting.catch(() => {});
+    return connectPair(pair);
+  }
+  connectingAddress = address;
+  const job = connecting = (async () => {
     clearTimeout(reconnectTimer);
+    await detaching;
     if (socket) { clearInterval(heartbeat); socket.onclose = null; socket.close(); await disconnect(); }
     const current = new WebSocket(address);
     socket = current;
@@ -358,7 +365,7 @@ async function connectPair(pair) {
       throw error;
     }
   })();
-  try { await connecting; } finally { connecting = null; }
+  try { await job; } finally { if (connecting === job) { connecting = null; connectingAddress = null; } }
 }
 async function reconnectSaved() {
   const data = await chrome.storage.local.get(PAIR_KEY);
@@ -389,7 +396,22 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 chrome.runtime.onStartup.addListener(() => reconnectSaved().catch(() => {}));
-chrome.runtime.onInstalled.addListener(() => reconnectSaved().catch(() => {}));
+async function restorePairingPages() {
+  // Reloading/updating an extension does not reinject manifest content scripts
+  // into existing pages. Recover only local pages that carry a valid capability.
+  const tabs = await chrome.tabs.query({url: 'http://127.0.0.1/*'});
+  for (const tab of tabs) {
+    if (tab.incognito || !tab.id || !tab.url) continue;
+    const url = new URL(tab.url);
+    if (url.pathname !== '/greatlibrary/connect' ||
+        !validPair({port: Number(url.port), token: url.hash.slice(1)})) continue;
+    await chrome.tabs.reload(tab.id).catch(() => {});
+  }
+}
+chrome.runtime.onInstalled.addListener(() => {
+  reconnectSaved().catch(() => {});
+  restorePairingPages().catch(() => {});
+});
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === 'greatlibrary-reconnect') reconnectSaved().catch(() => {});
 });

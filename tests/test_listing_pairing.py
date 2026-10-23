@@ -120,3 +120,43 @@ def test_offline_paired_ui_waits_instead_of_requesting_connection():
     fake.connection_status = SimpleNamespace(setText=texts.append)
     ListingWindow.update_connection_status(fake)
     assert texts[-1] == "配对已记住 · 等待 Edge 扩展自动上线"
+
+
+@pytest.mark.parametrize("online", [False, True])
+def test_manual_connection_repairs_saved_pair_without_interrupting_live_pair(
+    monkeypatch, online
+):
+    from types import SimpleNamespace
+    import threading
+    from suite.listing import ui
+
+    opened = []
+    connected = threading.Event()
+    if online:
+        connected.set()
+    bridge = SimpleNamespace(
+        connected=connected,
+        pairing=SimpleNamespace(data={"paired": True}),
+        start=lambda: object(),
+        open_edge=lambda: opened.append(True),
+    )
+    signal = SimpleNamespace(connect=lambda callback: None)
+
+    class FakeJob:
+        def __init__(self, *args):
+            self.result = self.failed = self.finished = signal
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(ui, "Job", FakeJob)
+    fake = SimpleNamespace(
+        check_job=None,
+        bridge=bridge,
+        save_preferences=lambda: None,
+        error=lambda message: pytest.fail(message),
+        log=SimpleNamespace(appendPlainText=lambda message: None),
+        busy=lambda active: None,
+    )
+    ui.ListingWindow.check_login(fake)
+    assert opened == ([] if online else [True])

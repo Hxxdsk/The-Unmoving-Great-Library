@@ -83,7 +83,7 @@ main{{background:white;border:1px solid #e6dcf5;border-radius:20px;padding:36px}
 <p id="status">首次使用请加载连接扩展；已加载时会自动连接。</p>
 <ol><li>打开 <b>edge://extensions</b>，开启“开发人员模式”。</li>
 <li>点击“加载解压缩的扩展”，选择下方目录。</li>
-<li>首次配对后返回工具箱；以后重启浏览器或工具箱会自动重连，无须再次配对。</li></ol>
+<li>安装或更新扩展后会自动连接；若未连接，请刷新本页。配对完成后返回工具箱，以后会自动重连。</li></ol>
 <p><code>{path}</code></p><p>使用当前 Edge 登录状态；普通标签页可以继续使用。请勿手动操作工具的抖店工作页。Edge 会显示扩展调试提示，任务期间请保留。</p></main></html>"""
 
     async def _request(self, connection, request):
